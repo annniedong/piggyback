@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Piggyback",
+  "version": "0.1.0",
+  "description": "Pauses checkout on any site so Piggyback can judge your purchase. Put it back.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "tts"
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Piggyback"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "shop.js",
+        "cart.js",
+        "sale.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

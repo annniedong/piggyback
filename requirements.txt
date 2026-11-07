@@ -1,0 +1,11 @@
+# Brain server (brain.py)
+fastapi
+uvicorn
+pydantic>=2
+pyserial
+google-genai
+anthropic
+websockets
+
+# Browser bot (bot/); also run: python -m playwright install chromium
+-r bot/requirements.txt

@@ -12,15 +12,22 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import serial
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, HttpUrl
 
 # ---------------------------------------------------------------- config
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # gemini | claude | mock
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")  # 3.7/3.8-flash timed out on the free key (Nov 7)
+# Gemini "thinking" depth. MINIMAL: ~1.2 s per question vs ~3.2 s at the default, same quality in testing.
+GEMINI_THINKING = os.getenv("GEMINI_THINKING", "MINIMAL").upper()
+# Used when GEMINI_MODEL hits the free-tier limit (5 requests/min per model) or times out.
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5-5")
 ADVISOR_MODEL = os.getenv("ADVISOR_MODEL", "claude-opus-5-5")
 USE_ADVISOR = os.getenv("USE_ADVISOR", "1") == "1"
@@ -236,19 +243,31 @@ def parse_reply(text: str, default: dict) -> dict:
 
 async def ask_gemini(prompt: str) -> str:
     from google import genai
-    from google.genai import types
+    from google.genai import errors, types
 
     client = genai.Client()  # reads GEMINI_API_KEY
-    resp = await client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_json_schema=RESPONSE_SCHEMA,
-        ),
-    )
-    return resp.text or ""
+    models = [GEMINI_MODEL] + ([GEMINI_FALLBACK_MODEL] if GEMINI_FALLBACK_MODEL != GEMINI_MODEL else [])
+    for i, model in enumerate(models):
+        try:
+            resp = await client.aio.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_json_schema=RESPONSE_SCHEMA,
+                    thinking_config=(types.ThinkingConfig(thinking_level=GEMINI_THINKING)
+                                     if GEMINI_THINKING != "DEFAULT" and "lite" not in model else None),
+                ),
+            )
+            return resp.text or ""
+        except errors.APIError as e:
+            # Free tier: 5 requests/min per model. Quotas are per model, so try the fallback model.
+            if e.code in (429, 503, 504) and i + 1 < len(models):
+                log(f"Gemini {model} unavailable ({e.code}), retrying with {models[i + 1]}")
+                continue
+            raise
+    return ""
 
 
 _claude = None
@@ -398,6 +417,32 @@ async def budget_review() -> dict:
 app = FastAPI()
 # The extension and fake store page call /review from the browser.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+# Fake store for the demo, at http://localhost:8000/store/ (the extension's content script runs there).
+app.mount("/store", StaticFiles(directory=HERE / "store", html=True), name="store")
+# AI sale / coupon detection for the extension: POST /sale (see sales.py).
+from sales import router as sales_router  # noqa: E402
+app.include_router(sales_router)
+
+
+class ShoppingAlert(BaseModel):
+    type: Literal["shopping_visit", "ad_referral", "over_budget", "cart_count", "shopping_visits"]
+    website: HttpUrl
+    value: float | None = None
+
+
+@app.post("/alert")
+async def shopping_alert(alert: ShoppingAlert):
+    log("Browser alert:", alert.model_dump(mode="json"))
+    lines = {
+        "ad_referral": "An ad brought you here. Take a breath before you buy.",
+        "over_budget": "That cart is over your weekly budget. Put it back.",
+        "cart_count": "More than five items? Time to review that cart.",
+        "shopping_visits": "That's a lot of shopping visits this week. Take a break.",
+    }
+    if alert.type in lines:
+        await head.expr("suspicious")
+        await speak(lines[alert.type])
+    return {"ok": True}
 
 
 @app.get("/review")
@@ -437,10 +482,10 @@ async def say_and_show(ws: WebSocket, reply: dict, msg: dict):
     await speak(reply["line"])
 
 
-async def next_turn(ws: WebSocket, session: dict):
+async def next_turn(ws: WebSocket, session: dict, pending: "asyncio.Task | None" = None):
     final = session["questions"] >= QUESTIONS_PER_PURCHASE
     await head.expr("thinking")
-    reply = await ask_llm(session, final)
+    reply = await pending if pending else await ask_llm(session, final)
 
     if not final:
         session["questions"] += 1
@@ -481,8 +526,10 @@ async def ws_endpoint(ws: WebSocket):
                     "questions": 0, "transcript": [], "done": False,
                 }
                 await head.expr("alert")
-                await asyncio.sleep(0.6)  # let the alert pose land before thinking
-                await next_turn(ws, session)
+                # Start the LLM now so it runs while the alert pose lands (saves ~0.6 s).
+                first = asyncio.create_task(ask_llm(session, final=False))
+                await asyncio.sleep(0.6)
+                await next_turn(ws, session, first)
 
             elif kind == "answer":
                 if not session or session["done"]:

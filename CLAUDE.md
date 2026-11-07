@@ -13,15 +13,18 @@ Pitch idea: digital money is invisible, so Piggyback gives your spending a physi
 ## Architecture
 
 ```
-Chrome extension ──WebSocket──► brain.py (laptop, FastAPI :8000)
-                                   │  Gemini Flash: checkout questions + verdicts
-                                   │  Claude: on-demand budget review (GET /review)
-                                   │  speaks via macOS `say`
-                                   └──USB serial (JSON lines)──► ESP32 firmware
-                                                                   ├─PWM──► 2× neck servos (pan/tilt)
-                                                                   ├─I2C bus 0─► left SSD1306 OLED eye
-                                                                   └─I2C bus 1─► right SSD1306 OLED eye
+Chrome extension ──WebSocket /ws────► brain.py (laptop, one FastAPI app :8000)
+bot/browser.py ───HTTP POST /alert──►    │
+                                         │  Gemini Flash: checkout questions + verdicts
+                                         │  Claude: on-demand budget review (GET /review)
+                                         │  speaks via macOS `say`
+                                         └──USB serial (JSON lines)──► ESP32 firmware
+                                                                         ├─PWM──► 2× neck servos (pan/tilt)
+                                                                         ├─I2C bus 0─► left SSD1306 OLED eye
+                                                                         └─I2C bus 1─► right SSD1306 OLED eye
 ```
+
+All HTTP/WebSocket endpoints (`/ws`, `/alert`, `/review`, `/health`, plus the `/store` demo page) live on the single `app` in `brain.py`. Don't start a second server: only one process can hold the ESP32's serial port, and every endpoint needs it.
 
 No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no Wi-Fi or network setup. The ESP32 has two hardware I2C buses, so both OLEDs can keep the default 0x3C address.
 
@@ -30,6 +33,10 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 - `brain.py` (laptop): conversation logic, LLM calls, hard budget rules, TTS, logging, and commands to the ESP32.
 - `firmware/piggyback_esp32/piggyback_esp32.ino` (ESP32, Arduino): turns expression names into servo motion and eye images.
 - `test_client.py` (laptop): pretends to be the extension for testing the brain.
+- `extension/` (Chrome, Manifest V3): holds "Place order" on the demo store and runs the checkout conversation (`content.js`), Budget review popup (`popup.html`), browsing alerts to `/alert` (`background.js`). Load unpacked; see `extension/README.md`.
+- `store/` (served by the brain at http://localhost:8000/store/): fake demo store; its Place order button carries `data-piggyback="place-order"` with `data-item`, `data-price`, `data-category`.
+- `sales.py` (laptop): `POST /sale`, AI check for sales/coupons/promo codes on a shopping page, and `POST /cart`, AI reading of item count + subtotal from any store's cart page or cart drawer (Gemini, Claude, or keyword fallback with `LLM_PROVIDER=mock`). Loaded into `brain.py` with `include_router`.
+- `bot/` (laptop, optional): Playwright browser that watches Amazon/Target/Walmart tabs and posts browsing alerts to `/alert`. Separate process; see `bot/README.md`. Tests: `python -m unittest bot.test_detector`.
 
 ## Message formats
 
@@ -47,6 +54,15 @@ Brain → extension:
 {"type": "question", "line": "...", "expression": "suspicious"}
 {"type": "verdict", "verdict": "release" | "timer" | "escalate", "seconds": 60, "line": "...", "rule": null}
 ```
+
+Browser bot → brain (HTTP `POST http://localhost:8000/alert`, returns `{"ok": true}`):
+
+```json
+{"type": "shopping_visit" | "ad_referral" | "over_budget" | "cart_count" | "shopping_visits",
+ "website": "https://www.amazon.com/...", "value": 182.5}
+```
+
+`shopping_visit` is only logged; the others set `suspicious` and speak a warning. Alerts never block, ask questions, or touch `budget.json`. `over_budget` uses the bot's `--weekly-budget` flag, not `budget.json`.
 
 Budget review (HTTP, extension button → `GET http://localhost:8000/review`, add `?speak_it=true` to have Piggyback say the summary out loud):
 
@@ -95,9 +111,13 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 ## Config (environment variables)
 
 - `LLM_PROVIDER` (checkout conversation): `gemini` (default, the plan), `claude`, or `mock` (canned lines, no API key; for testing and as a demo backup)
-- `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.8-flash`; check what the key supports)
+- `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.5-flash`; 3.7/3.8-flash timed out on the team's free key). Can also go in a git-ignored `piggyback/.env`; `GEMINI_API_KEY_WEB` there is used for scraping and, if `GEMINI_API_KEY` isn't set, for the chat too.
+- `GEMINI_WEB_MODEL` (default `gemini-3.5-flash-lite`, ~1 s): model for the scraping checks in `sales.py`
+- `GEMINI_THINKING` (default `MINIMAL`): Gemini thinking level for the chat; ~1.2 s per turn vs ~3.2 s at `DEFAULT`
+- `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`): chat retries on this model when `GEMINI_MODEL` returns 429/503/504. The free tier allows 5 requests/min per model and a checkout uses 3, so back-to-back rehearsals hit it
 - `ANTHROPIC_API_KEY`, `EXECUTOR_MODEL` (default `claude-sonnet-5-5`), `ADVISOR_MODEL` (default `claude-opus-5-5`), `USE_ADVISOR` (default `1`; Claude advisor tool, beta `advisor-tool-2026-03-01`, used only for the final verdict so questions stay fast). Claude requests also enable server-side refusal fallbacks (`fallbacks: "default"`).
 - `REVIEW_MODEL` (default `claude-opus-5-5`): model for the budget review; needs `ANTHROPIC_API_KEY`
+- `SCRAPE_AI` (default `auto`): when the web-scraping checks (`/sale`, `/cart` in `sales.py`) call the LLM. `auto` = free local check first, LLM only when it isn't sure (lone "Sale" word, struck prices with no stated offer, cart missing a number or two local readers disagreeing); `always`; `never`. The checkout chat always uses the LLM.
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
 - `SERIAL_BAUD` (default `115200`)
@@ -107,7 +127,8 @@ Run:
 
 ```
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install fastapi uvicorn pyserial google-genai anthropic websockets
+pip install -r requirements.txt
+python -m playwright install chromium   # only needed for bot/
 export GEMINI_API_KEY=...
 uvicorn brain:app --port 8000
 ```
