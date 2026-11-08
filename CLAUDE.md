@@ -176,14 +176,14 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
 - `SERIAL_BAUD` (default `115200`)
- HEAD
+
 - `VOICE` (macOS `say` voice)
 - `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `CAMERA_URL` (unset; a wireless camera's stream URL, e.g. the Logitech on a Pi Zero running ustreamer at `http://pig-cam.local:8080/stream`; overrides the name and index, keeps only the newest frame, reconnects if Wi-Fi drops; set `MIC_DEVICE` to a mic on the laptop since the Logitech's mic isn't), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini)
-=======
+
 - `VOICE` (macOS `say` voice), `SPEECH_RATE` (default `215` words per minute; macOS default is about 180)
 - `END_PAUSE` (default `0.8`): seconds of quiet that end a spoken answer
 - `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini)
- 94fddb0b845e600e03025c5b687ae2e170a6f950
+
 - `CONFIRM_SECONDS` (default `3`), `CONFIRM_WAIT` (default `10`): stare needed to confirm a release, and how long to wait for it
 - `LOOK_AWAY_GRACE` (default `0.6`): seconds of looking away mid-answer that break it
 - Tracking calibration: `TRACK_GAIN` (default `0.15`), `TRACK_INVERT_PAN`, `TRACK_INVERT_TILT`, `GAZE_INVERT_X` (set to `1` if the head or pupils move away from the user)
