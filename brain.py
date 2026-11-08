@@ -768,6 +768,9 @@ class AddedToBag(BaseModel):
 REMARK_PROMPT = """You are Piggyback, a robot piggy bank: warm, playful, a little cheeky. The user just put
 something in their shopping bag. Say ONE quick spoken line, under 12 words, reacting to it, and hint that
 you'll talk about it at checkout. Don't ask a question they need to answer yet. No lecture, no emoji.
+If an ad brought them to this site, that's the joke: they got distracted by an ad (like "Ooh, this was
+from an ad, wasn't it? You got distracted."); up to 14 words then. Otherwise you can poke at a sale or
+countdown that's rushing them.
 Reply with JSON: line, expression (one of idle, alert, suspicious, skeptical, satisfied, disappointed, thinking)."""
 
 REMARK_SCHEMA = {
@@ -779,16 +782,23 @@ REMARK_SCHEMA = {
 
 REMARK_LINES = ["Ooh, into the bag. We'll talk at checkout.", "I saw that. We'll chat at checkout.",
                 "Noted. Save some arguments for checkout."]
+AD_REMARK_LINES = ["Ooh, this was from an ad, wasn't it? You got distracted.",
+                   "An ad brought you here. Distracted much? We'll talk at checkout.",
+                   "Saw an ad, now it's in the bag? We'll chat at checkout."]
 _last_remark = 0.0
 
 
 async def quick_remark(added: AddedToBag) -> dict:
-    default = {"line": random.choice(REMARK_LINES), "expression": "suspicious"}
+    ad = sales.ad_source(str(added.website))
+    default = {"line": random.choice(AD_REMARK_LINES if ad else REMARK_LINES), "expression": "suspicious"}
     if LLM_PROVIDER != "gemini":
         return default
     remaining = store.remaining(store.load())
     price = f" for ${added.price:,.2f}" if added.price else ""
     prompt = f"They added: {added.item}{price}. ${remaining:.0f} left in this month's budget."
+    seen = sales.seen_on(str(added.website))
+    if seen:
+        prompt += "\nWhat you noticed on this site:\n" + seen
     try:
         text = await asyncio.wait_for(ask_gemini(prompt, system=REMARK_PROMPT, schema=REMARK_SCHEMA, fast=True), 2.5)
     except Exception as e:

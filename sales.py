@@ -378,10 +378,17 @@ _visits = {"day": "", "count": 0}
 
 
 def site_of(url: str | None) -> str:
+    """The store, not the exact host: an ad lands on oldnavy.gap.com but the bag is on
+    secure-oldnavy.gap.com, so both are "gap.com" (and shop.example.co.uk is "example.co.uk")."""
     try:
-        return (urlparse(url or "").hostname or "").removeprefix("www.")
+        host = (urlparse(url or "").hostname or "").removeprefix("www.")
     except ValueError:
         return ""
+    labels = host.split(".")
+    if len(labels) <= 2 or host.replace(".", "").isdigit():
+        return host
+    keep = 3 if len(labels[-1]) == 2 and labels[-2] in ("co", "com", "org", "net", "ac", "gov", "edu") else 2
+    return ".".join(labels[-keep:])
 
 
 def note(url: str, **facts):
@@ -417,6 +424,20 @@ def note_alert(kind: str, url: str, value: float | None = None, count: int | Non
         note(url, cart_count=int(value) if value is not None else None)
     elif kind == "over_budget":
         note(url, cart_total=value)
+
+
+def ad_source(url: str | None) -> str | None:
+    """What brought them to this store, if it was paid: "a Google ad", "a sponsored search result"..."""
+    s = _seen.get(site_of(url))
+    if not s or time.time() - s["at"] >= SEEN_FOR_S:
+        return None
+    if s.get("sponsored"):
+        return s["sponsored"]
+    if s.get("retargeted"):
+        return "a retargeting ad for something they'd already looked at"
+    if s.get("ad"):
+        return s["ad"] if isinstance(s["ad"], str) else "an ad"
+    return None
 
 
 def seen_on(url: str | None) -> str:

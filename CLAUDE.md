@@ -75,7 +75,7 @@ Add to bag (HTTP `POST http://localhost:8000/added`, from `background.js` when a
 {"website": "https://...", "item": "Wool Twill Pants", "price": 1200}
 ```
 
-The item goes in the bag right away; Piggyback turns to `alert` and says one quick line out loud (Gemini on `GEMINI_FALLBACK_MODEL`, about 2 s, canned line after 2.5 s), like "Twelve-hundred bucks for pants? We'll chat at checkout." The argument still waits for checkout, where the AI is told what went in the bag. Skipped during an argument and within 5 s of the last remark.
+The item goes in the bag right away; Piggyback turns to `alert` and says one quick line out loud (Gemini on `GEMINI_FALLBACK_MODEL`, about 2 s, canned line after 2.5 s), like "Twelve-hundred bucks for pants? We'll chat at checkout." The remark is told what the extension noticed on that store (below); when an ad brought them there, it teases them about it ("Ooh, this was from an ad, wasn't it? You got distracted."), and so do the canned lines. The argument still waits for checkout, where the AI is told what went in the bag. Skipped during an argument and within 5 s of the last remark.
 
 Brain → extension (the overlay, a small card in the bottom-right corner, shows all of these):
 
@@ -96,7 +96,7 @@ Browser bot → brain (HTTP `POST http://localhost:8000/alert`, returns `{"ok": 
  "website": "https://www.amazon.com/...", "value": 182.5, "count": 7, "detail": "a Google ad"}
 ```
 
-Signals are silent: nothing is spoken and the head doesn't move. `sales.py` keeps them per site for 30 minutes (`ad_referral` with `detail` = which ad; `sponsored` = clicked a paid search result; `retargeted` with `detail` = product/store and `value` = days since first visit; `upsell` with `detail` = the section; `cart` with `count` and `value` = total; `shopping_visit` with `value` = pages today), along with any sale `/sale` found. Detection rules are in `extension/adsignals.js`. When a checkout arrives with a `url` on that site, the AI prompt gets a "what you noticed on the page" section, and Piggyback brings it up ("An ad brought you here and the countdown is rushing you"). These are reasons to question, not to refuse; a real need still wins.
+Signals are silent: nothing is spoken and the head doesn't move. `sales.py` keeps them per store for 30 minutes (subdomains together: an ad landing on oldnavy.gap.com and the bag on secure-oldnavy.gap.com are both gap.com) (`ad_referral` with `detail` = which ad; `sponsored` = clicked a paid search result; `retargeted` with `detail` = product/store and `value` = days since first visit; `upsell` with `detail` = the section; `cart` with `count` and `value` = total; `shopping_visit` with `value` = pages today), along with any sale `/sale` found. Detection rules are in `extension/adsignals.js`. When a checkout arrives with a `url` on that site, the AI prompt gets a "what you noticed on the page" section, and Piggyback brings it up ("An ad brought you here and the countdown is rushing you"). These are reasons to question, not to refuse; a real need still wins.
 
 Budget review (HTTP, extension button → `GET http://localhost:8000/review`, add `?speak_it=true` to have Piggyback say the summary out loud):
 

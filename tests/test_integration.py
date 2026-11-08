@@ -271,9 +271,13 @@ class ApiTest(unittest.TestCase):
         self.brain.reset()
 
     def test_added_to_bag_speaks_once_then_waits(self):
+        # An ad brought them to the store (one subdomain); the bag is on another: the remark brings up the ad.
+        self.brain.post("/alert", {"type": "ad_referral", "detail": "a Google ad",
+                                   "website": "https://oldnavy.gap.com/browse/jeans?gclid=abc"})
         before = self.brain.log_size()
-        first = self.brain.post("/added", {"website": "https://shop.example/p/1", "item": "Wool pants", "price": 120})
-        self.assertTrue(first["line"])
+        first = self.brain.post("/added", {"website": "https://secure-oldnavy.gap.com/shopping-bag",
+                                           "item": "Wool pants", "price": 120})
+        self.assertRegex(first["line"], r"\bad\b")
         self.brain.wait_log(r"Added to bag: .*Wool pants", before)
         self.brain.wait_log(re.escape(f"Piggyback says: {first['line']}"), before)
         again = self.brain.post("/added", {"website": "https://shop.example/p/2", "item": "Belt", "price": 30})
