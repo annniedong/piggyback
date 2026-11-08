@@ -16,23 +16,22 @@ Pitch idea: digital money is invisible, so Piggyback gives your spending a physi
 Chrome extension ──WebSocket /ws────► brain.py (laptop, one FastAPI app :8000)
 bot/browser.py ───HTTP POST /alert──►    │  Gemini Flash (Vertex, piggyback-brain): checkout questions + verdicts
 extension ────────POST /sale, /cart──►   │  sales.py: page reading (Gemini flash-lite, Alisha's key)
-                                               │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
+                                               │  speaks via macOS `say`, hears answers on the laptop's mic (faster-whisper)
                                          │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
                                          │  store.py + dashboard.html: profile, goals, waiting room (GET /)
                                          └──USB serial (JSON lines)──► ESP32 firmware
                                                                          ├─PWM──► 2× neck servos (pan/tilt)
-                                                                         ├─I2C bus 0─► left SSD1306 OLED eye
-                                                                         └─I2C bus 1─► right SSD1306 OLED eye
+                                                                         └─I2C (SDA 21, SCL 22)─► one SSD1306 OLED, both eyes
 ```
 
 All HTTP/WebSocket endpoints (`/ws`, `/alert`, `/review`, `/health`, plus the `/store` demo page) live on the single `app` in `brain.py`. Don't start a second server: only one process can hold the ESP32's serial port, and every endpoint needs it.
 
-No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no Wi-Fi or network setup. The ESP32 has two hardware I2C buses, so both OLEDs can keep the default 0x3C address.
+No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no Wi-Fi or network setup, and the Logitech webcam plugs into the laptop by USB. One 128×64 OLED shows both eyes.
 
 ## Files
 
 - `brain.py` (laptop): conversation logic, LLM calls, hard budget rules, TTS, logging, and commands to the ESP32.
-- `firmware/piggyback_esp32/piggyback_esp32.ino` (ESP32, Arduino): turns expression names into servo motion and eye images.
+- `firmware/pig_eyes/pig_eyes.ino` (ESP32, Arduino): draws both eyes on one OLED from the brain's commands. Head servo code is on a separate branch (see ESP32 firmware). `firmware/piggyback_esp32/` is the older all-in-one sketch, kept as a reference.
 - `vision.py` (laptop): reads the webcam in the pig's head; tracks the face and whether the user is looking at the eyes. Downloads `models/face_landmarker.task` on first run.
 - `store.py` (laptop, or Cloud Run later): the user's profile: budget, purchases, savings goals, the waiting room, and past arguments. `STORE=json` keeps it in `profile.json` (migrated automatically from the old `budget.json`); `STORE=firestore` keeps it in Firestore document `profiles/<PROFILE_ID>` (needs `pip install google-cloud-firestore`; not tested yet). Same functions either way.
 - `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget. Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
@@ -111,6 +110,7 @@ Brain → ESP32 (USB serial, 115200 baud, one JSON object per line ending in `\n
 ```json
 {"expr": "suspicious"}
 {"look": [pan, tilt]}
+{"look": [pan, tilt], "s": 1.5}
 {"gaze": [x, y]}
 {"stare": 0.4}
 {"ping": 1}
@@ -126,7 +126,8 @@ ESP32 → brain (one JSON object per line):
 ```
 
 - Expressions: `idle, alert, suspicious, skeptical, satisfied, disappointed, thinking`. Unknown names fall back to `idle` and reply with `err`.
-- `look` values are −1…1, with `[0, 0]` as center. The ESP32 maps them onto its own `LIMITS`, so the brain never needs servo angles.
+- `look` values are −1…1, with `[0, 0]` as center. The ESP32 maps them onto its own `LIMITS`, so the brain never needs servo angles. `look` sets the direction the pig faces; optional `s` is how long the move takes (default 0.3 s; the brain uses `TURN_SECONDS` for slow turns toward or away from the user).
+- Expressions are small nods and tilts around the facing direction (`PRESETS` are degree offsets), so the pig keeps facing the user while it reacts. An expression never speeds up a slow turn that's still going.
 - `gaze` (−1…1) moves the OLED pupils toward the user; `stare` (0…1) shows stare-down eyes whose lids close as the confirmation progresses. Both are sent ~10×/s and get no reply. Any `expr` ends a stare.
 - The ESP32 replies right away and moves in the background. A new command interrupts the current motion.
 - The brain never waits on replies; it only logs them.
@@ -152,7 +153,9 @@ ESP32 → brain (one JSON object per line):
 6. `decision` messages are logged to `decisions.jsonl` with the verdict. If the user completed a purchase after a `timer` or `escalate`, Piggyback looks disappointed and says "You went for it anyway. I'll keep that in mind." Completed purchases are added to the profile (seeded with a fake month of spending, a $600 budget, and one savings goal), and mark that item as bought in the waiting room.
 7. Memory (`store.py`): each verdict is saved as an argument (item, what the user said, need/want, verdict). A `timer` or `escalate` puts the item in the waiting room; checking out the same item again counts as another try. The AI is told the user's savings goals (and what share of the remaining goal this purchase is), which attempt this is, and what they said last time, so it can say "Third time this week" or "Last time you said they were a gift." On the dashboard the user can let a waiting item go (optionally moving its price into a goal) or say they still want it.
 
-Tracking (10×/s): the OLED pupils follow the user's face (`gaze`), and the head turns to keep the face centered in the camera (`look`). Since the camera is in the head, centered face = pig facing the user. Tracking pauses for ~1.3 s after each expression so the pose plays, and the head holds still while recording so servo noise doesn't reach the mic. When a face appears after 5 s of nobody, Piggyback wakes up (`alert`).
+Facing the user: when nobody's buying, the head rests turned away (`IDLE_LOOK`), minding its own business. Something going in the bag starts a slow turn toward where the user was last seen (before the remark is even written), and it keeps facing them for 15 s, through the whole checkout argument, and 8 s after the decision; then it slowly turns away again.
+
+Tracking (10×/s, while facing the user): the OLED pupils follow the user's face (`gaze`), and the head turns to keep the face centered in the camera (`look`). Since the camera is in the head, centered face = pig facing the user. Tracking pauses for ~1.3 s after each expression so the pose plays, and the head holds still while recording so servo noise doesn't reach the mic. When a face appears after 5 s of nobody, Piggyback wakes up (`alert`).
 
 Gemini sees a downscaled webcam frame with each call (when a face is visible), so it can react to what it sees ("You're already holding one"). The prompt tells it never to judge honesty from faces and not to base the verdict on the photo. Frames are kept in memory only, never saved; tell demo users the camera is on.
 
@@ -176,15 +179,18 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
 - `SERIAL_BAUD` (default `115200`)
+
 - `VOICE` (macOS `say` voice), `SPEECH_RATE` (default `215` words per minute; macOS default is about 180)
 - `END_PAUSE` (default `0.8`): seconds of quiet that end a spoken answer
-- `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini)
+- `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini). `CAMERA_URL` (unset; not used for the demo): read the camera as a network video stream instead (e.g. from a Pi running ustreamer); it keeps only the newest frame and reconnects if the stream drops, but only if the stream was up when the brain started. Nothing in the repo sets up a stream yet.
+
 - `CONFIRM_SECONDS` (default `3`), `CONFIRM_WAIT` (default `10`): stare needed to confirm a release, and how long to wait for it
 - `LOOK_AWAY_GRACE` (default `0.6`): seconds of looking away mid-answer that break it
+- `IDLE_LOOK` (default `0.6,0`; pan,tilt in `look` units): where the head rests when idle. Point it away from the user (toward the laptop, say); `0,0` to keep facing forward. `TURN_SECONDS` (default `1.5`): how long the turn toward or away from the user takes; raise it if the servos lag.
 - Tracking calibration: `TRACK_GAIN` (default `0.15`), `TRACK_INVERT_PAN`, `TRACK_INVERT_TILT`, `GAZE_INVERT_X` (set to `1` if the head or pupils move away from the user)
 - Eye-contact thresholds: `LOOK_MAX_YAW` (`0.15`), `LOOK_MIN_PITCH` (`0.25`), `LOOK_MAX_PITCH` (`0.85`), `LOOK_MAX_EYE_TURN` (`0.45`)
 - `STORE` (default `json`; `firestore` for Cloud Run), `PROFILE_ID` (default `default`; the Firestore document), `PROFILE_FILE` (default `profile.json`; tests point it elsewhere)
-- `MIC_DEVICE` (default `logitech`; the first input whose name contains this)
+- `MIC_DEVICE` (default `macbook`, the laptop's built-in mic; the first input whose name contains this. `logitech` uses the webcam's mic instead)
 - `SPEAKER` (default `jbl`; Piggyback's voice goes to the first audio output whose name contains this, via `say -a`; re-checked every 30 s so a speaker that reconnects is picked up; falls back to the system default)
 - `LISTEN` (default `1`; `0` turns off the mic, answers must be typed), `WHISPER_MODEL` (default `base.en`), `MAX_LISTEN_SECONDS` (default `8`), `NO_SPEECH_SECONDS` (default `6`)
 
@@ -203,24 +209,21 @@ Close the Arduino Serial Monitor before starting the brain: only one program can
 
 Camera calibration: with the brain running, open `http://localhost:8000/vision.jpg` (refresh to update) and `http://localhost:8000/vision`. Sit where the user sits: the marker should turn green only when you look at the OLED eyes. Adjust the `LOOK_*` values from the numbers shown. Then check the head turns toward you, not away; if not, set `TRACK_INVERT_PAN` / `TRACK_INVERT_TILT`. Allow camera access for your terminal the first time.
 
-Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods can't take over: the camera and mic whose names contain "logitech", and the speaker whose name contains "jbl" (`python check_devices.py speaker` lists outputs and says a test line on the one picked). If none matches (e.g. testing on a laptop), it uses the first camera and the default mic that aren't a phone or virtual device (iPhone, iPad, Desk View, BlackHole, OBS, Zoom, Teams). `/health` and the startup log show which camera, mic, and speaker were picked. Run `python check_devices.py` from your own Terminal app first: macOS asks for camera and microphone permission there, and commands run by Claude Code can't trigger the popup. Turning off Continuity Camera on nearby iPhones (Settings → General → AirPlay & Continuity) also helps. The Whisper model (~150 MB) downloads on the first run, so start the brain once before the venue Wi-Fi matters.
+Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods can't take over: the camera whose name contains "logitech", the laptop's own mic ("macbook"), and the speaker whose name contains "jbl" (`python check_devices.py speaker` lists outputs and says a test line on the one picked). If none matches (e.g. testing on a laptop), it uses the first camera and the default mic that aren't a phone or virtual device (iPhone, iPad, Desk View, BlackHole, OBS, Zoom, Teams). `/health` and the startup log show which camera, mic, and speaker were picked. Run `python check_devices.py` from your own Terminal app first: macOS asks for camera and microphone permission there, and commands run by Claude Code can't trigger the popup. Turning off Continuity Camera on nearby iPhones (Settings → General → AirPlay & Continuity) also helps. The Whisper model (~150 MB) downloads on the first run, so start the brain once before the venue Wi-Fi matters.
 
-## ESP32 firmware (firmware/piggyback_esp32)
+## ESP32 firmware
 
-- Arduino IDE or `arduino-cli` with the ESP32 board package. Libraries: ArduinoJson, Adafruit SSD1306, Adafruit GFX, ESP32Servo.
-- Suggested pins (confirm for your board): pan servo GPIO 18, tilt servo GPIO 19; left eye on I2C bus 0 (SDA 21, SCL 22); right eye on I2C bus 1 (SDA 25, SCL 26). Write the final pins here once wired.
-- Servos are driven straight from ESP32 PWM pins with ESP32Servo. MG90S servos accept the 3.3 V signal. If that's unreliable, fall back to the PCA9685 on I2C bus 0 (address 0x40, it can share the bus with the left eye).
-- `LIMITS` clamps angles; `PRESETS` maps expressions to (pan, tilt, eyes, seconds). Motion uses smoothstep easing, stepped inside `loop()` without `delay()` so new commands interrupt it.
-- Both I2C buses run at 400 kHz so full-frame eye redraws keep up with `gaze` updates; eyes redraw at most ~15 fps.
-- At boot: move slowly to the home pose, show `idle` eyes, then print `{"ready": true}`.
-- Eyes are drawn with shapes in `drawEye()` (128×64, one color), not bitmaps; `thinking` animates. Swap in bitmaps later if the team draws them.
-- TODO: calibrate `PRESETS` and `LIMITS` once the head is mounted.
+- `firmware/pig_eyes/pig_eyes.ino` (Lorraine): the eyes. One SSD1306 128×64 OLED at 0x3C on SDA 21 / SCL 22 shows both eyes side by side, with blinking, brows, pupils that follow `gaze`, and stare-down lids. Speaks the brain's JSON commands over USB; `look` is accepted and ignored here. Also takes typed commands in Serial Monitor for testing (`HELP`, `EYES suspicious`, `GAZE 50 0`, `BLINK`, `STATUS`). Libraries: Adafruit SSD1306, Adafruit GFX.
+- Head servos: on a separate branch. The brain talks to one ESP32 over one USB port, so the servo code has to end up in the same sketch as the eyes before the demo. `firmware/piggyback_esp32/` is the older all-in-one sketch (two OLEDs, servos on GPIO 18/19); use it as a reference for `look` with the optional `"s"` turn time and expressions as small nods around the facing direction.
+- Wi-Fi is off. The brain only uses USB. To test the eyes over Wi-Fi without a cable, copy `firmware/pig_eyes/secrets.example.h` to `secrets.h` (git-ignored, so a hotspot password never reaches this public repo) and fill in a 2.4 GHz hotspot; the eyes then also listen on `pig.local:3333`. Leave it off for the demo: anyone on that network could send commands.
+- Arduino IDE or `arduino-cli` with the ESP32 board package (board: ESP32 Dev Module). The sketch folder and `.ino` name must match.
+- At boot it prints `{"ready":true}`; the brain waits for that line after opening the port.
 
 ## Hardware
 
-- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, Logitech webcam with mic (on the laptop), JBL speaker for Piggyback's voice (connected to the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
-- Webcam goes inside the head, between or just above the OLED eyes, so looking at the eyes = looking at the camera. Take it out of its clip/stand to save weight: MG90S servos are small, so keep the camera close to the tilt axis and leave slack in the USB cable so it doesn't drag the head. Its mic is now right next to the servos, which is why the head freezes while recording.
-- Power rules: servos run from the bench supply, never from the ESP32's 5V/VIN pin; the ESP32 is powered by the laptop's USB; all grounds shared (bench supply ground ↔ ESP32 GND). OLEDs run from the ESP32's 3.3V pin.
+- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 1× SSD1306 0.96" 128×64 OLED (both eyes), Logitech webcam (USB to the laptop; answers are heard on the laptop's own mic), JBL speaker for Piggyback's voice (connected to the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
+- Webcam goes inside the head, between or just above the OLED eyes, so looking at the eyes = looking at the camera. Take it out of its clip/stand to save weight: MG90S servos are small, so keep the camera close to the tilt axis and leave slack in the USB cable so it doesn't drag the head. The head still holds still while recording, so servo noise doesn't reach the mic if you switch back to the webcam's mic (`MIC_DEVICE=logitech`). With the laptop mic, keep the laptop within about an arm's length of the user, and the JBL pointed away from the laptop.
+- Power rules: servos run from the bench supply, never from the ESP32's 5V/VIN pin; the ESP32 is powered by the laptop's USB; all grounds shared (bench supply ground ↔ ESP32 GND). The OLED runs from the ESP32's 3.3V pin.
 
 ## Team
 
@@ -243,7 +246,7 @@ Each milestone has a test anyone can run and a pass check. Don't start the next 
 | A6 | Eye contact | Annie | `/vision.jpg` while sitting at the pig; look at the eyes, then at the screen, your phone, and away. Then argue a close-to-budget purchase (e.g. $150 of $231 left) out loud | Green only when looking at the eyes; a blink doesn't break an answer, a real look away does (first time: redo; second: argument over); a clean close-to-budget argument can end in release; a clean over-budget argument for a want ends in timer; a clean one proving a real need (e.g. broken laptop charger, project due tomorrow) can end in release |
 | B1 | ESP32 talks serial | Lorraine, Hana | Flash the firmware, open Serial Monitor at 115200, type `{"ping":1}` | Boot prints `{"ready":true}`; ping returns `{"pong":1}`; bad JSON returns `err` without crashing |
 | B2 | Servos move | Lorraine, Hana | In Serial Monitor, send `{"expr":"alert"}` and each of the other 6 expressions, then `{"look":[1,0]}`, `{"look":[-1,0]}`, `{"look":[0,1]}` | Head moves smoothly to each pose, stays within `LIMITS`, ESP32 doesn't brown out or reset |
-| B3 | Both eyes draw | Lorraine, Hana | Same commands | Both OLEDs show the right eyes for each expression |
+| B3 | Both eyes draw | Lorraine, Hana | Same commands | The OLED shows the right eyes for each expression |
 | B4 | Head calibrated | Lorraine, Hana | Same commands with the head shell mounted | Poses read clearly from where the user sits; `PRESETS`, `LIMITS`, and pins committed |
 | B5 | Pupils and stare | Lorraine, Hana | Send `{"gaze":[1,0]}`, `{"gaze":[-1,0.5]}`, then `{"stare":0}` … `{"stare":1}` | Pupils move to each side; stare lids close smoothly; an `expr` command returns to normal eyes |
 | C1 | Bot reads checkout | Alisha | Open checkout on the fake store (and one real store) with the brain off | Bot prints the right item, price, and category, and reconnects when the brain starts |

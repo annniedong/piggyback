@@ -11,6 +11,12 @@ from pathlib import Path
 
 CAMERA_NAME = os.getenv("CAMERA_NAME", "logitech")  # picked by name so a nearby iPhone can't take over
 CAMERA_INDEX = os.getenv("CAMERA_INDEX")  # set a number to skip name matching
+# Wireless camera: a video stream URL (e.g. the Logitech on a Pi running ustreamer,
+# http://pig-cam.local:8080/stream). When set, CAMERA_NAME and CAMERA_INDEX are ignored.
+CAMERA_URL = os.getenv("CAMERA_URL")
+# Webcam MJPEG often has odd APP segments; FFmpeg then prints "unable to decode APP fields"
+# for every frame even though it decodes fine. -8 = quiet. Must be set before cv2 loads.
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 # Never fall back to these: Continuity Camera phones and virtual cameras show the wrong picture.
 SKIP_DEVICES = ("iphone", "ipad", "desk view", "continuity", "blackhole", "virtual", "obs", "zoom", "teams")
 MODEL_PATH = Path(__file__).parent / "models" / "face_landmarker.task"
@@ -55,6 +61,60 @@ def pick_camera():
     return 0, names[0] if names else "camera 0"
 
 
+class StreamCapture:
+    """Reads a network video stream (MJPEG over HTTP, RTSP, ...) like cv2.VideoCapture.
+
+    A background thread keeps only the newest frame, so a slow face tracker never falls
+    behind a buffered stream, and it reconnects if Wi-Fi drops."""
+
+    def __init__(self, url: str):
+        import cv2
+
+        self.url = url
+        self._cv2 = cv2
+        self._cap = cv2.VideoCapture(url)
+        self._frame = None
+        self._new = threading.Event()
+        self._lock = threading.Lock()
+        if self._cap.isOpened():
+            threading.Thread(target=self._grab, daemon=True).start()
+
+    def isOpened(self) -> bool:
+        return self._cap.isOpened()
+
+    def _grab(self):
+        failed_since = None
+        while True:
+            ok, frame = self._cap.read()
+            if ok:
+                failed_since = None
+                with self._lock:
+                    self._frame = frame
+                self._new.set()
+                continue
+            now = time.monotonic()
+            failed_since = failed_since or now
+            if now - failed_since > 2:  # stream lost: reopen it
+                print("Camera stream lost, reconnecting:", self.url, flush=True)
+                self._cap.release()
+                time.sleep(1)
+                self._cap = self._cv2.VideoCapture(self.url)
+                failed_since = None
+            else:
+                time.sleep(0.05)
+
+    def read(self):
+        """The newest frame not yet returned; waits up to 1 s for one."""
+        if not self._new.wait(1.0):
+            return False, None
+        with self._lock:
+            self._new.clear()
+            return True, self._frame
+
+    def release(self):
+        self._cap.release()
+
+
 def measure(landmarks, blendshapes) -> dict:
     """Turn one face's landmarks into head-turn and eye-turn numbers. Pure function, easy to test."""
     nose, left, right = landmarks[NOSE_TIP], landmarks[LEFT_EYE_OUTER], landmarks[RIGHT_EYE_OUTER]
@@ -86,6 +146,15 @@ class Vision:
         try:
             import cv2
 
+            if CAMERA_URL:
+                self.state["camera"] = CAMERA_URL
+                print(f"Camera: stream {CAMERA_URL}", flush=True)
+                cap = StreamCapture(CAMERA_URL)
+                if not cap.isOpened():
+                    raise RuntimeError(f"camera stream {CAMERA_URL} didn't open: check the URL in a browser, "
+                                       "and that the laptop and the camera are on the same Wi-Fi")
+                threading.Thread(target=self._run, args=(cap,), daemon=True).start()
+                return
             index, name = pick_camera()
             self.state["camera"] = name
             print(f"Camera: {name} (index {index})", flush=True)

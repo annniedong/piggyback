@@ -1,7 +1,9 @@
 // Piggyback ESP32 firmware: neck servos + two OLED eyes, driven by JSON lines over USB serial.
 //
 // Commands (one JSON object per line, 115200 baud):
-//   {"expr": "suspicious"}   {"look": [pan, tilt]} (each -1..1)   {"ping": 1}
+//   {"expr": "suspicious"}   {"look": [pan, tilt]} (each -1..1, optional "s": seconds, default 0.3)   {"ping": 1}
+// "look" sets where the pig faces. Expressions are small nods and tilts AROUND that direction, so the
+// pig keeps facing the user while it reacts instead of turning away.
 //   {"gaze": [x, y]} (-1..1) moves the pupils to look at the user (no reply, sent ~10x/s)
 //   {"stare": p} (0..1) stare-down eyes with lids closing as p grows; any "expr" ends it (no reply)
 // Replies: {"ready":true} at boot, then {"ok":true} | {"err":"..."} | {"pong":1}
@@ -30,15 +32,16 @@ const int HOME_PAN = 90, HOME_TILT = 90;
 
 enum Eyes { EYES_IDLE, EYES_ALERT, EYES_SUSPICIOUS, EYES_SKEPTICAL, EYES_SATISFIED, EYES_DISAPPOINTED, EYES_THINKING, EYES_STARE };
 
+// pan / tilt are degrees added to the facing direction (from "look"), not absolute angles.
 struct Preset { const char* name; int pan; int tilt; Eyes eyes; float seconds; };
 const Preset PRESETS[] = {
-  {"idle",         90,  90, EYES_IDLE,         1.0},
-  {"alert",        90,  80, EYES_ALERT,        0.4},
-  {"suspicious",  100,  95, EYES_SUSPICIOUS,   0.8},
-  {"skeptical",    80, 100, EYES_SKEPTICAL,    0.8},
-  {"satisfied",    90,  85, EYES_SATISFIED,    0.6},
-  {"disappointed", 90, 110, EYES_DISAPPOINTED, 1.2},
-  {"thinking",    105,  82, EYES_THINKING,     1.0},
+  {"idle",          0,   0, EYES_IDLE,         1.0},
+  {"alert",         0,  -8, EYES_ALERT,        0.4},
+  {"suspicious",    5,   4, EYES_SUSPICIOUS,   0.8},
+  {"skeptical",    -5,   6, EYES_SKEPTICAL,    0.8},
+  {"satisfied",     0,  -4, EYES_SATISFIED,    0.6},
+  {"disappointed",  0,  15, EYES_DISAPPOINTED, 1.2},
+  {"thinking",      8,  -6, EYES_THINKING,     1.0},
 };
 const int NUM_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
@@ -53,6 +56,7 @@ Servo panServo, tiltServo;
 // ---------------------------------------------------------------- motion (smoothstep, non-blocking)
 
 float curPan = HOME_PAN, curTilt = HOME_TILT;
+int facePan = HOME_PAN, faceTilt = HOME_TILT;  // where the pig faces (last "look"); expressions are offsets from it
 float fromPan, fromTilt, toPan = HOME_PAN, toTilt = HOME_TILT;
 unsigned long moveStart = 0, moveMs = 0;
 
@@ -65,6 +69,11 @@ void moveTo(int pan, int tilt, float seconds) {
   toTilt = clampi(tilt, LIMITS.tiltMin, LIMITS.tiltMax);
   moveStart = millis();
   moveMs = (unsigned long)(seconds * 1000);
+}
+
+float secondsLeft() {
+  unsigned long gone = millis() - moveStart;
+  return gone < moveMs ? (moveMs - gone) / 1000.0 : 0;
 }
 
 void stepMotion() {
@@ -166,23 +175,26 @@ void reply(const char* json) { Serial.println(json); }
 void applyExpr(const char* name) {
   for (int i = 0; i < NUM_PRESETS; i++) {
     if (strcmp(PRESETS[i].name, name) == 0) {
-      moveTo(PRESETS[i].pan, PRESETS[i].tilt, PRESETS[i].seconds);
+      // Don't speed up a slow turn that's still going: finish it at least as slowly.
+      moveTo(facePan + PRESETS[i].pan, faceTilt + PRESETS[i].tilt, max(PRESETS[i].seconds, secondsLeft()));
       showEyes(PRESETS[i].eyes);
       reply("{\"ok\":true}");
       return;
     }
   }
-  moveTo(PRESETS[0].pan, PRESETS[0].tilt, PRESETS[0].seconds);
+  moveTo(facePan, faceTilt, max(PRESETS[0].seconds, secondsLeft()));
   showEyes(PRESETS[0].eyes);
   reply("{\"err\":\"unknown expr\"}");
 }
 
-void applyLook(float x, float y) {
+void applyLook(float x, float y, float seconds) {
   x = constrain(x, -1.0, 1.0);
   y = constrain(y, -1.0, 1.0);
   int pan = HOME_PAN + (int)(x * (x >= 0 ? LIMITS.panMax - HOME_PAN : HOME_PAN - LIMITS.panMin));
   int tilt = HOME_TILT + (int)(y * (y >= 0 ? LIMITS.tiltMax - HOME_TILT : HOME_TILT - LIMITS.tiltMin));
-  moveTo(pan, tilt, 0.3);
+  facePan = clampi(pan, LIMITS.panMin, LIMITS.panMax);
+  faceTilt = clampi(tilt, LIMITS.tiltMin, LIMITS.tiltMax);
+  moveTo(facePan, faceTilt, seconds);
   reply("{\"ok\":true}");
 }
 
@@ -195,7 +207,7 @@ void handleLine(const char* line) {
   if (doc["expr"].is<const char*>()) {
     applyExpr(doc["expr"]);
   } else if (doc["look"].is<JsonArray>() && doc["look"].size() == 2) {
-    applyLook(doc["look"][0].as<float>(), doc["look"][1].as<float>());
+    applyLook(doc["look"][0].as<float>(), doc["look"][1].as<float>(), doc["s"] | 0.3f);
   } else if (doc["gaze"].is<JsonArray>() && doc["gaze"].size() == 2) {
     gazeX = constrain(doc["gaze"][0].as<float>(), -1.0, 1.0);
     gazeY = constrain(doc["gaze"][1].as<float>(), -1.0, 1.0);
