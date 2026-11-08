@@ -45,6 +45,8 @@ REVIEW_MODEL = os.getenv("REVIEW_MODEL", "claude-opus-5-5")  # when REVIEW_PROVI
 SERIAL_PORT = os.getenv("SERIAL_PORT")  # None = auto-detect
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "115200"))
 VOICE = os.getenv("VOICE")  # None = system default voice
+SPEECH_RATE = int(os.getenv("SPEECH_RATE", "215"))  # words per minute for `say` (macOS default is about 180)
+END_PAUSE = float(os.getenv("END_PAUSE", "0.8"))  # seconds of quiet that end a spoken answer
 TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
 LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
@@ -71,10 +73,12 @@ VERDICTS = ["release", "timer", "escalate"]
 SERIAL_GLOBS = ["/dev/cu.usbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*", "/dev/cu.usbmodem*"]
 
 SYSTEM_PROMPT = """You are Piggyback, a robot piggy bank with a moving head and OLED eyes who sits on
-the user's desk and judges their online purchases before checkout. Your catchphrase is "Put it back."
+the user's desk and checks in on their online purchases before checkout. Your catchphrase is
+"Put it back." Save it for timers; don't say it every line.
 
-Personality: dry, skeptical, funny, a little dramatic, but on the user's side. You care about their
-budget more than they do. Never mean about the person, only about the purchase.
+Personality: warm, playful, a little cheeky, like a friend who's good with money and on their side.
+Curious, not accusatory: ask, don't lecture. Tease the purchase lightly, never the person, and never
+be sarcastic, harsh, or guilt-trippy. When they make a good point, say so.
 
 Your job is to stop impulse buys, not necessities. Tell needs from wants:
 - A need is something they rely on that broke or ran out, health or safety, or something work or school
@@ -84,7 +88,7 @@ Your job is to stop impulse buys, not necessities. Tell needs from wants:
 - Believe a reason that is specific and stays consistent. A vague reason, or a story that changes between
   answers, is a want until proven otherwise.
 
-Every reply is ONE spoken line: under 25 words, plain words, no emoji, no lists, no stage directions.
+Every reply is ONE spoken line: under 18 words, plain words, no emoji, no lists, no stage directions.
 It is read aloud by text-to-speech, so it must sound natural spoken.
 
 Only use facts you're given: the purchase, the budget, their spending history, their savings goals, past
@@ -94,23 +98,23 @@ weren't shown.
 
 Reply with JSON only: {"line": str, "expression": str, "verdict": str, "need": str}
 - expression is one of: idle, alert, suspicious, skeptical, satisfied, disappointed, thinking.
-- When asked a question turn, ask ONE short pointed question about the purchase and set verdict to "none".
+- When asked a question turn, ask ONE short, friendly question about the purchase and set verdict to "none".
   Good questions let them prove a need: what happened to the old one, what they use it for, whether it
   can wait, whether a cheaper option would do. Don't ask about other people's finances.
-  If they're saving for a goal, make them weigh the purchase against it. If they've tried to buy this
-  before, or said something different last time, call it out.
+  If they're saving for a goal, ask how the purchase fits with it. If they've tried to buy this
+  before, or said something different last time, mention it kindly.
   What you noticed on the page (an ad or sponsored listing brought them, an ad that followed them around
   the web, add-ons from "frequently bought together", a sale or countdown, a big cart, lots of shopping
-  today) are classic impulse pushes: bring them up and make them say if they'd buy it without the push.
+  today) are classic impulse pushes: bring them up and ask if they'd still buy it without the push.
   You can explain the trick in a few words (sellers pay for every click; retargeting ads follow you after
   you look at something). They're reasons to question, not reasons to refuse; a real need still wins.
 - The user answers out loud while looking you in the eyes, and the prompt says how their eye contact went.
-  Holding your gaze while arguing shows conviction; looking away is a weak sign worth teasing. Still judge
+  Holding your gaze while arguing shows conviction; looking away is worth a light tease. Still judge
   mainly on their reasons, not on eye contact alone.
 - When asked for the final verdict, set verdict to one of:
-  "release" (reasonable purchase or a proven need, let it go through),
-  "timer" (probably impulse, make them wait and reconsider),
-  "escalate" (bad idea or way over budget, tell their accountability buddy).
+  "release" (a reasonable purchase or a proven need: the default when the reasons are sensible),
+  "timer" (probably an impulse: a friendly "sleep on it", not a punishment),
+  "escalate" (clearly a bad idea or way over budget: loop in their accountability buddy).
   The line announces the verdict in character. Use "satisfied" for release, "skeptical" or
   "disappointed" for timer, "disappointed" for escalate.
 - need is your current read: "need" (they've shown a real necessity), "want", or "unclear".
@@ -134,13 +138,13 @@ DEFAULT_QUESTION = {"line": "Hold on. Do you actually need this, or do you just 
 DEFAULT_VERDICT = {"line": "I can't decide, so you wait. Put it back for a minute.", "expression": "skeptical", "verdict": "timer"}
 
 RULE_LINES = {
-    "over_budget": ("escalate", "disappointed", "That's more than your whole remaining budget. Put it back. I'm telling your buddy."),
-    "half_budget": ("timer", "skeptical", "That eats more than half of what's left this month. Cool off first."),
-    "invalid_verdict": ("timer", "skeptical", "I'm not sure about this one. Wait a minute and think it over."),
-    "no_eye_contact": ("timer", "disappointed", "You can't even look me in the eye. Wait a minute."),
-    "looked_away": ("timer", "disappointed", "You looked away twice. Argument over."),
-    "over_budget_argued": ("timer", "skeptical", "That's over your budget, so no. But you argued it to my face, "
-                                                 "so you get a timer instead of a call to your buddy."),
+    "over_budget": ("escalate", "disappointed", "That's more than your whole remaining budget, so I'm looping in your buddy on this one."),
+    "half_budget": ("timer", "skeptical", "That's over half of what's left this month. Let's give it a minute first."),
+    "invalid_verdict": ("timer", "thinking", "I can't decide on this one. Give it a minute and see if you still want it."),
+    "no_eye_contact": ("timer", "skeptical", "I didn't get that stare, so let's give it a minute."),
+    "looked_away": ("timer", "skeptical", "You looked away twice, so let's pause this one for a minute."),
+    "over_budget_argued": ("timer", "thinking", "It's over budget, but you made a real case to my face. "
+                                                "Sleep on it instead of me calling your buddy."),
 }
 
 
@@ -282,7 +286,7 @@ async def speak(line: str):
     log("🐷 Piggyback says:", line)
     if speech_proc and speech_proc.returncode is None:
         speech_proc.terminate()
-    args = ["say"] + (["-v", VOICE] if VOICE else []) + [line]
+    args = ["say", "-r", str(SPEECH_RATE)] + (["-v", VOICE] if VOICE else []) + [line]
     try:
         speech_proc = await asyncio.create_subprocess_exec(*args)
     except FileNotFoundError:
@@ -376,7 +380,7 @@ def record_answer(frames, gate=lambda: True):
         peak = max(peak, rms)
         talking = loud and rms > peak * 0.2
         silence = 0.0 if talking else silence + FRAME / SAMPLE_RATE
-        if silence > 1.0 or elapsed > MAX_LISTEN_SECONDS:
+        if silence > END_PAUSE or elapsed > MAX_LISTEN_SECONDS:
             break
     return (np.concatenate(voiced) if voiced else None), False
 
@@ -534,11 +538,11 @@ async def ask_llm(session: dict, final: bool) -> dict:
     turn = ("Give your FINAL VERDICT now." if final else
             f"Ask question {session['questions'] + 1} of {session['total']}.")
     tier_note = {
-        "easy": "This fits the budget comfortably.",
-        "close": "This uses more than half of what's left this month. Make them argue for it and press on "
-                 "weak reasons. A release only stands if they hold eye contact through every answer.",
-        "over": "This is MORE than the whole remaining budget. Make them argue hard. Only a proven necessity "
-                "that can't wait earns a release; a good argument for a want earns a timer; otherwise escalate.",
+        "easy": "This fits the budget comfortably. Keep it light, and release it if their reasons are sensible.",
+        "close": "This uses more than half of what's left this month. Ask them to make their case and gently "
+                 "push on vague reasons. A release only stands if they hold eye contact through every answer.",
+        "over": "This is MORE than the whole remaining budget. Ask them to make a real case. Only a proven "
+                "necessity that can't wait earns a release; a good argument for a want earns a timer; otherwise escalate.",
     }[session["tier"]]
     if not session["verified"]:
         eyes = "Eye contact can't be checked right now."
@@ -986,7 +990,7 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
             await ws.send_json({"type": "looked_away", "strikes": session["strikes"], "heard": text})
             if session["strikes"] == 1:
                 await head.expr("suspicious")
-                await speak("You looked away. That doesn't count. Look at me and say it again.")
+                await speak("You looked away. Look at me and say that again.")
                 await done_speaking()
                 continue
             # Second strike: the argument is over and the verdict comes now.
@@ -1062,7 +1066,7 @@ async def ws_endpoint(ws: WebSocket):
                     # The bot can't block checkout, so Piggyback at least lets you know.
                     await done_speaking()  # let the verdict finish first
                     await head.expr("disappointed")
-                    await speak("You bought it anyway. I'll remember that.")
+                    await speak("You went for it anyway. I'll keep that in mind.")
                 else:
                     await head.expr("idle")
 

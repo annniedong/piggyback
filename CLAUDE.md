@@ -126,10 +126,10 @@ ESP32 → brain (one JSON object per line):
 1. On `checkout`: start a session, send `alert`, then `thinking` while waiting for the LLM.
 2. The LLM returns JSON `{"line", "expression", "verdict"}`. The server moves the head, sends the line to the bot, and speaks it.
 3. After speaking a question, it waits for eye contact (up to 3 s, then says "Look me in the eyes and tell me." and waits 6 s more). The whole answer has to be said looking at the pig: speech only starts counting while the user is looking, and looking away for more than `LOOK_AWAY_GRACE` (0.6 s; a blink or glance is fine) mid-answer breaks it.
-   - First break: "You looked away. That doesn't count. Look at me and say it again." and they redo that answer.
-   - Second break: "You looked away twice. Argument over." The argument ends, the verdict comes right away, and it can't be better than `timer` (rule `looked_away`).
+   - First break: "You looked away. Look at me and say that again." and they redo that answer.
+   - Second break: "You looked away twice, so let's pause this one for a minute." The argument ends, the verdict comes right away, and it can't be better than `timer` (rule `looked_away`).
    Without a working camera, answers can't be verified, so close-to-budget and over-budget purchases get the strict rules.
-   It listens on the mic: recording starts at the first loud sound, stops after a 1 s pause (anything well below the speaker's own volume counts as a pause, so room noise doesn't keep it recording; max 8 s), and faster-whisper transcribes it. Nothing heard in 6 s counts as "(no answer)". A typed `answer` also works; whichever arrives first wins.
+   It listens on the mic: recording starts at the first loud sound, stops after a 0.8 s pause (`END_PAUSE`; anything well below the speaker's own volume counts as a pause, so room noise doesn't keep it recording; max 8 s), and faster-whisper transcribes it. Nothing heard in 6 s counts as "(no answer)". A typed `answer` also works; whichever arrives first wins.
 4. The budget tier sets how long the argument is (`QUESTIONS_BY_TIER`): **easy** (fits comfortably) 2 questions, **close** (more than half of what's left) 3, **over** (more than what's left) 3. The AI is told the tier and how the user's eye contact has gone, and presses harder on close and over.
    Its job is to stop impulse buys, not necessities: with each reply it also rates the purchase `need`, `want`, or `unclear`. A need (something they rely on broke or ran out, health or safety, required for work or school, can't wait) gets a release even if it hurts the budget; upgrades, duplicates, treats, gifts, and vague or changing stories are wants.
 5. `apply_rules()` can only make a verdict stricter. A **clean** argument means every answer was spoken with camera-verified, unbroken eye contact (typed answers never count) and nothing went unanswered.
@@ -138,7 +138,7 @@ ESP32 → brain (one JSON object per line):
    - over: escalate (`over_budget`), unless the argument was clean. Clean, and the AI says release and rated it a `need` → release (`necessity`, still needs the 3 s stare). Clean and the AI was convinced otherwise (release or timer) → timer (`over_budget_argued`).
    - two look-aways → timer, or escalate if over budget or the AI said escalate (`looked_away`). Invalid verdict → timer.
    A `release` then has to be earned: Piggyback sends `confirm`, says "Look me in the eyes for 3 seconds if you're sure," and the OLED lids close as you hold its stare. Looking away resets it. No 3-second stare within 10 s → `timer` with rule `no_eye_contact`.
-6. `decision` messages are logged to `decisions.jsonl` with the verdict. If the user completed a purchase after a `timer` or `escalate`, Piggyback looks disappointed and says "You bought it anyway." Completed purchases are added to the profile (seeded with a fake month of spending, a $600 budget, and one savings goal), and mark that item as bought in the waiting room.
+6. `decision` messages are logged to `decisions.jsonl` with the verdict. If the user completed a purchase after a `timer` or `escalate`, Piggyback looks disappointed and says "You went for it anyway. I'll keep that in mind." Completed purchases are added to the profile (seeded with a fake month of spending, a $600 budget, and one savings goal), and mark that item as bought in the waiting room.
 7. Memory (`store.py`): each verdict is saved as an argument (item, what the user said, need/want, verdict). A `timer` or `escalate` puts the item in the waiting room; checking out the same item again counts as another try. The AI is told the user's savings goals (and what share of the remaining goal this purchase is), which attempt this is, and what they said last time, so it can say "Third time this week" or "Last time you said they were a gift." On the dashboard the user can let a waiting item go (optionally moving its price into a goal) or say they still want it.
 
 Tracking (10×/s): the OLED pupils follow the user's face (`gaze`), and the head turns to keep the face centered in the camera (`look`). Since the camera is in the head, centered face = pig facing the user. Tracking pauses for ~1.3 s after each expression so the pose plays, and the head holds still while recording so servo noise doesn't reach the mic. When a face appears after 5 s of nobody, Piggyback wakes up (`alert`).
@@ -165,7 +165,8 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
 - `SERIAL_BAUD` (default `115200`)
-- `VOICE` (macOS `say` voice)
+- `VOICE` (macOS `say` voice), `SPEECH_RATE` (default `215` words per minute; macOS default is about 180)
+- `END_PAUSE` (default `0.8`): seconds of quiet that end a spoken answer
 - `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini)
 - `CONFIRM_SECONDS` (default `3`), `CONFIRM_WAIT` (default `10`): stare needed to confirm a release, and how long to wait for it
 - `LOOK_AWAY_GRACE` (default `0.6`): seconds of looking away mid-answer that break it
@@ -234,7 +235,7 @@ Each milestone has a test anyone can run and a pass check. Don't start the next 
 | B4 | Head calibrated | Lorraine, Hana | Same commands with the head shell mounted | Poses read clearly from where the user sits; `PRESETS`, `LIMITS`, and pins committed |
 | B5 | Pupils and stare | Lorraine, Hana | Send `{"gaze":[1,0]}`, `{"gaze":[-1,0.5]}`, then `{"stare":0}` … `{"stare":1}` | Pupils move to each side; stare lids close smoothly; an `expr` command returns to normal eyes |
 | C1 | Bot reads checkout | Alisha | Open checkout on the fake store (and one real store) with the brain off | Bot prints the right item, price, and category, and reconnects when the brain starts |
-| C2 | Bot ↔ brain | Alisha + Annie | Fake store → brain on the laptop (ESP32 unplugged) | Reaching checkout starts the questions; buying sends `completed`, leaving sends `abandoned`; both land in `decisions.jsonl`; buying after a `timer` triggers "You bought it anyway" |
+| C2 | Bot ↔ brain | Alisha + Annie | Fake store → brain on the laptop (ESP32 unplugged) | Reaching checkout starts the questions; buying sends `completed`, leaving sends `abandoned`; both land in `decisions.jsonl`; buying after a `timer` triggers "You went for it anyway" |
 | M4 | Full end-to-end | All | Fake store → brain → ESP32 over USB | Head and pupils follow the user, answers only count with eye contact, a release needs the 3 s stare, verdicts are spoken, 3 runs in a row |
 | M5 | Failure drills | All | During a run: unplug the ESP32's USB; set a bad API key; deny or unplug the mic; cover or unplug the camera | Brain keeps going (prints commands / uses default line / accepts typed answers / skips eye contact) and reconnects when replugged |
 | M6 | Latency check | Annie | Time from reaching checkout to first spoken word, and from end of an answer to the next line | Under ~3 s; if not, switch model, shorten prompt, or start `thinking` sooner |
@@ -244,6 +245,6 @@ Stretch milestones (only after M4): ElevenLabs voice.
 
 ## Next up
 
-- Personality tuning.
+- Personality: warm and playful, not harsh (tuned Nov 7); lines under 18 words.
 - Possible MLH prizes: Best Use of Gemini API; Best Use of ElevenLabs (swap `speak()` for an ElevenLabs voice).
 - Before judging: rehearse, record a backup video.
