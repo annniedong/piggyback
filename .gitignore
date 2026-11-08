@@ -6,3 +6,4 @@ profile.tmp
 decisions.jsonl
 .DS_Store
 models/
+.env

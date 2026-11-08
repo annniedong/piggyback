@@ -12,21 +12,29 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import serial
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, HttpUrl
 
 import store
+from sales import load_env_file
+from sales import router as sales_router
 from vision import vision
+
+load_env_file()  # settings from the git-ignored .env, before the config below reads them; real env vars win
 
 # ---------------------------------------------------------------- config
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # gemini | claude | mock
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_THINKING = os.getenv("GEMINI_THINKING", "low")  # low | medium | high (some models: minimal); lower = faster
+# Tried when GEMINI_MODEL is rate-limited or times out. Quotas are per model, so this one usually has room.
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5-5")
 ADVISOR_MODEL = os.getenv("ADVISOR_MODEL", "claude-opus-5-5")
 USE_ADVISOR = os.getenv("USE_ADVISOR", "1") == "1"
@@ -410,17 +418,17 @@ FRAME_NOTE = ("\n\nAttached is a webcam photo of the user taken just now from Pi
 
 
 _gemini = None
-_gemini_thinking_ok = True  # flips off if the model rejects the thinking setting
+_gemini_no_thinking = set()  # models that rejected the thinking setting
 
 
 async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
-    global _gemini, _gemini_thinking_ok
+    global _gemini
     from google import genai
-    from google.genai import types
+    from google.genai import errors, types
 
     if _gemini is None:
-        # One client for the whole run, so each turn reuses the connection.
-        # Reads GEMINI_API_KEY, or the GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_* settings.
+        # One client for the whole run, so each turn reuses the connection. Uses the
+        # GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_* settings, or GEMINI_API_KEY. Never Alisha's page-reading key.
         _gemini = genai.Client()
     contents = prompt
     if image:
@@ -435,16 +443,23 @@ async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
             thinking_config=types.ThinkingConfig(thinking_level=GEMINI_THINKING) if thinking else None,
         )
 
-    try:
-        resp = await _gemini.aio.models.generate_content(
-            model=GEMINI_MODEL, contents=contents, config=config(_gemini_thinking_ok))
-    except Exception as e:
-        if not _gemini_thinking_ok:
-            raise
-        log(f"Gemini rejected thinking_level={GEMINI_THINKING}, retrying without it:", repr(e))
-        _gemini_thinking_ok = False
-        resp = await _gemini.aio.models.generate_content(model=GEMINI_MODEL, contents=contents, config=config(False))
-    return resp.text or ""
+    models = [GEMINI_MODEL] + ([GEMINI_FALLBACK_MODEL] if GEMINI_FALLBACK_MODEL not in ("", GEMINI_MODEL) else [])
+    for i, model in enumerate(models):
+        for thinking in ((False,) if model in _gemini_no_thinking else (True, False)):
+            try:
+                resp = await _gemini.aio.models.generate_content(model=model, contents=contents,
+                                                                 config=config(thinking))
+                return resp.text or ""
+            except errors.APIError as e:
+                if thinking and e.code == 400:  # this model doesn't support the thinking setting
+                    log(f"Gemini {model} rejected thinking_level={GEMINI_THINKING}, retrying without it")
+                    _gemini_no_thinking.add(model)
+                    continue
+                if e.code in (429, 503, 504) and i + 1 < len(models):
+                    log(f"Gemini {model} unavailable ({e.code}), retrying with {models[i + 1]}")
+                    break
+                raise
+    return ""
 
 
 _claude = None
@@ -616,8 +631,33 @@ async def budget_review() -> dict:
 # ---------------------------------------------------------------- server
 
 app = FastAPI()
-# The bot, the fake store page, and the dashboard call these from the browser.
+# The extension, the fake store page, and the dashboard call these from the browser.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# Fake store for the demo, at http://localhost:8000/store/ (the extension's content script runs there).
+app.mount("/store", StaticFiles(directory=HERE / "store", html=True), name="store")
+# Page reading for the extension: POST /sale and POST /cart (see sales.py).
+app.include_router(sales_router)
+
+
+class ShoppingAlert(BaseModel):
+    type: Literal["shopping_visit", "ad_referral", "over_budget", "cart_count", "shopping_visits"]
+    website: HttpUrl
+    value: float | None = None
+
+
+@app.post("/alert")
+async def shopping_alert(alert: ShoppingAlert):
+    log("Browser alert:", alert.model_dump(mode="json"))
+    lines = {
+        "ad_referral": "An ad brought you here. Take a breath before you buy.",
+        "over_budget": "That cart is over your weekly budget. Put it back.",
+        "cart_count": "More than five items? Time to review that cart.",
+        "shopping_visits": "That's a lot of shopping visits this week. Take a break.",
+    }
+    if alert.type in lines:
+        await head.expr("suspicious")
+        await speak(lines[alert.type])
+    return {"ok": True}
 
 
 @app.get("/review")
@@ -825,11 +865,11 @@ async def say_and_show(ws: WebSocket, reply: dict, msg: dict):
     await speak(reply["line"])
 
 
-async def next_turn(ws: WebSocket, session: dict):
+async def next_turn(ws: WebSocket, session: dict, pending: "asyncio.Task | None" = None):
     final = session["questions"] >= session["total"] or session["failed"]
     await head.expr("thinking")
     t0 = time.time()
-    reply = await ask_llm(session, final)
+    reply = await pending if pending else await ask_llm(session, final)
     log(f"Timing: AI replied in {time.time() - t0:.1f}s")
 
     if not final:
@@ -957,9 +997,11 @@ async def ws_endpoint(ws: WebSocket):
                 }
                 log(f"Budget tier: {tier} ({session['total']} questions)")
                 await head.expr("alert")
-                await asyncio.sleep(0.6)  # let the alert pose land before thinking
+                # Start the AI now so it runs while the alert pose lands (saves ~0.6 s).
+                first = asyncio.create_task(ask_llm(session, final=False))
+                await asyncio.sleep(0.6)
                 async with session["lock"]:
-                    await next_turn(ws, session)
+                    await next_turn(ws, session, first)
 
             elif kind == "answer":
                 # Typed answers still work (test_client.py, or if the mic fails).

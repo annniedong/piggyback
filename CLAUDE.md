@@ -2,7 +2,7 @@
 
 A robot piggy bank that judges your online purchases. Built for MakeCU 2026 (Columbia's hardware hackathon, Nov 7–8), Creativity track.
 
-When you reach checkout on a shopping site, a bot reading the page spots it and tells Piggyback what you're buying. Piggyback turns its head toward you, changes its eyes, and asks two short questions out loud. You have to look it in the (OLED) eyes to answer: a webcam in its head knows when you're making eye contact, and its eyes and head follow you. Then it gives a verdict: go ahead (only after you hold its stare for 3 seconds), take a cooling-off timer, or it escalates to an accountability buddy. The bot only watches, so verdicts are advice, but if you buy anyway Piggyback notices and says so. Catchphrase: "Put it back."
+When you click "Place order" on a shopping site, the Piggyback Chrome extension pauses checkout and tells Piggyback what you're buying. Piggyback turns its head toward you, changes its eyes, and asks two or three short questions out loud. You have to look it in the (OLED) eyes to answer: a webcam in its head knows when you're making eye contact, and its eyes and head follow you. Then it gives a verdict: go ahead (only after you hold its stare for 3 seconds), take a cooling-off timer, or it escalates to an accountability buddy. The extension holds the order until the verdict; you can still buy anyway, and Piggyback notices and says so. Catchphrase: "Put it back."
 
 Pitch idea: digital money is invisible, so Piggyback gives your spending a physical, expressive presence. You can argue with it, but only to its face: holding eye contact through a real argument can save a close call, and only a proven necessity gets an over-budget purchase through.
 
@@ -13,16 +13,20 @@ Pitch idea: digital money is invisible, so Piggyback gives your spending a physi
 ## Architecture
 
 ```
-Page-reading bot ──WebSocket──► brain.py (laptop, FastAPI :8000)
-                                   │  Gemini Flash: checkout questions + verdicts
-                                   │  Claude: on-demand budget review (GET /review)
-                                   │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
-                                   │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
-                                   └──USB serial (JSON lines)──► ESP32 firmware
-                                                                   ├─PWM──► 2× neck servos (pan/tilt)
-                                                                   ├─I2C bus 0─► left SSD1306 OLED eye
-                                                                   └─I2C bus 1─► right SSD1306 OLED eye
+Chrome extension ──WebSocket /ws────► brain.py (laptop, one FastAPI app :8000)
+bot/browser.py ───HTTP POST /alert──►    │  Gemini Flash (Vertex, piggyback-brain): checkout questions + verdicts
+extension ────────POST /sale, /cart──►   │  sales.py: page reading (Gemini flash-lite, Alisha's key)
+                                         │  Claude: on-demand budget review (GET /review)
+                                         │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
+                                         │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
+                                         │  store.py + dashboard.html: profile, goals, waiting room (GET /)
+                                         └──USB serial (JSON lines)──► ESP32 firmware
+                                                                         ├─PWM──► 2× neck servos (pan/tilt)
+                                                                         ├─I2C bus 0─► left SSD1306 OLED eye
+                                                                         └─I2C bus 1─► right SSD1306 OLED eye
 ```
+
+All HTTP/WebSocket endpoints (`/ws`, `/alert`, `/review`, `/health`, plus the `/store` demo page) live on the single `app` in `brain.py`. Don't start a second server: only one process can hold the ESP32's serial port, and every endpoint needs it.
 
 No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no Wi-Fi or network setup. The ESP32 has two hardware I2C buses, so both OLEDs can keep the default 0x3C address.
 
@@ -33,12 +37,16 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 - `vision.py` (laptop): reads the webcam in the pig's head; tracks the face and whether the user is looking at the eyes. Downloads `models/face_landmarker.task` on first run.
 - `store.py` (laptop, or Cloud Run later): the user's profile: budget, purchases, savings goals, the waiting room, and past arguments. `STORE=json` keeps it in `profile.json` (migrated automatically from the old `budget.json`); `STORE=firestore` keeps it in Firestore document `profiles/<PROFILE_ID>` (needs `pip install google-cloud-firestore`; not tested yet). Same functions either way.
 - `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget. Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
-- `check_devices.py` (laptop): checks the camera and mic before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
-- `test_client.py` (laptop): pretends to be the bot for testing the brain (answers are typed).
+- `check_devices.py` (laptop): checks the camera, mic, and Gemini before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
+- `test_client.py` (laptop): pretends to be the extension for testing the brain (`--auto` canned answers, `--voice` answer out loud; `BRAIN_URL` for another port).
+- `extension/` (Chrome, Manifest V3): holds "Place order" on the demo store and runs the checkout conversation (`content.js`), Budget review popup (`popup.html`), browsing alerts to `/alert` (`background.js`). Load unpacked; see `extension/README.md`.
+- `store/` (served by the brain at http://localhost:8000/store/): fake demo store; its Place order button carries `data-piggyback="place-order"` with `data-item`, `data-price`, `data-category`.
+- `sales.py` (laptop): `POST /sale`, AI check for sales/coupons/promo codes on a shopping page, and `POST /cart`, AI reading of item count + subtotal from any store's cart page or cart drawer. Uses only `GEMINI_API_KEY_WEB`; local checks without it. Loaded into `brain.py` with `include_router`; also loads the git-ignored `.env`.
+- `bot/` (laptop, optional): Playwright browser that watches Amazon/Target/Walmart tabs and posts browsing alerts to `/alert`. Separate process; see `bot/README.md`. Tests: `python -m unittest bot.test_detector`.
 
 ## Message formats
 
-Bot → brain (WebSocket `ws://localhost:8000/ws`):
+Extension → brain (WebSocket `ws://localhost:8000/ws`):
 
 ```json
 {"type": "checkout", "item": "Smart toaster", "price": 400, "category": "kitchen"}
@@ -46,11 +54,11 @@ Bot → brain (WebSocket `ws://localhost:8000/ws`):
 {"type": "answer", "text": "I need it for work"}
 ```
 
-- `checkout`: send when the bot sees a checkout page. `price` is a number in dollars.
-- `decision`: `completed` when the bot sees the order confirmation page, `abandoned` when the user leaves checkout without buying.
+- `checkout`: sent when the user clicks Place order (or similar). `price` is a number in dollars.
+- `decision`: `completed` when the user goes ahead with the order, `abandoned` when they put it back.
 - `answer`: optional. Spoken answers are heard by the brain itself; typed answers are for testing or if the mic fails.
 
-Brain → bot (the bot can ignore these, or show them):
+Brain → extension (the overlay shows `question` and `verdict`; it doesn't show `heard`, `confirm`, or `looked_away` yet):
 
 ```json
 {"type": "question", "line": "...", "expression": "suspicious"}
@@ -60,7 +68,16 @@ Brain → bot (the bot can ignore these, or show them):
 {"type": "verdict", "verdict": "release" | "timer" | "escalate", "seconds": 60, "line": "...", "rule": null}
 ```
 
-Budget review (HTTP, `GET http://localhost:8000/review` from the bot or `curl`; how it's triggered in the demo is still open; add `?speak_it=true` to have Piggyback say the summary out loud):
+Browser bot → brain (HTTP `POST http://localhost:8000/alert`, returns `{"ok": true}`):
+
+```json
+{"type": "shopping_visit" | "ad_referral" | "over_budget" | "cart_count" | "shopping_visits",
+ "website": "https://www.amazon.com/...", "value": 182.5}
+```
+
+`shopping_visit` is only logged; the others set `suspicious` and speak a warning. Alerts never block, ask questions, or touch the profile. `over_budget` uses the bot's `--weekly-budget` flag, not the profile's budget.
+
+Budget review (HTTP, extension button → `GET http://localhost:8000/review`, add `?speak_it=true` to have Piggyback say the summary out loud):
 
 ```json
 {"monthly_budget": 600, "spent": 369, "remaining": 231, "by_category": {"food": 244, "fun": 85},
@@ -136,15 +153,16 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 ## Config (environment variables)
 
 - `LLM_PROVIDER` (checkout conversation): `gemini` (default, the plan), `claude`, or `mock` (canned lines, no API key; for testing and as a demo backup)
-- `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.8-flash`; check what the key supports)
-- Gemini sign-in, either:
-  - **API key** (simplest): create one at https://aistudio.google.com/apikey with a personal Gmail account and `export GEMINI_API_KEY=...`. School/work Google accounts often block API keys ("API Keys are Disallowed").
-  - **Vertex AI with Application Default Credentials** (for accounts that block keys): install the gcloud CLI, run `gcloud auth application-default login`, enable the Vertex AI API on a project with billing, then `export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=<project-id> GOOGLE_CLOUD_LOCATION=global`. No code change: the `google-genai` client picks these up.
-  - With Vertex AI, also run `gcloud auth application-default set-quota-project <project-id>` once, or you'll get a "without a quota project" warning and possible quota errors.
-  - `GEMINI_THINKING` (default `low`): how much the model reasons before answering. `low` measured ~1.5–2 s per reply on `gemini-3.8-flash` vs 3–5 s on the model default; this model rejects `minimal`.
-  - Check either with `python check_devices.py gemini`. Use separate projects for the brain and Alisha's bot so their usage limits don't collide; only the brain's project needs billing (it sends webcam frames).
+- Two Gemini sign-ins, one per job, so their usage limits never collide:
+  - **Checkout conversation** (`brain.py`): Vertex AI on project `piggyback-brain`, signed in with Application Default Credentials (the team's Google accounts block API keys). Install the gcloud CLI, run `gcloud auth application-default login` and `gcloud auth application-default set-quota-project piggyback-brain` once, then set `GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=piggyback-brain GOOGLE_CLOUD_LOCATION=global` (export them or put them in `.env`). A personal `GEMINI_API_KEY` also works if Vertex isn't set. Check with `python check_devices.py gemini`.
+  - **Page reading** (`sales.py`, `/sale` and `/cart`): `GEMINI_API_KEY_WEB`, Alisha's key from her own project. Only this key is used there; without it, page reading uses local checks only.
+  - Settings can go in a git-ignored `.env` next to `brain.py` (loaded at startup; real environment variables win). Never put keys in code.
+- `GEMINI_MODEL` (default `gemini-3.8-flash`), `GEMINI_THINKING` (default `low`; ~1.5–2 s per reply on 3.8-flash vs 3–5 s on the model default). If a model rejects the thinking setting (3.8-flash rejects `minimal`), that model is retried without it. On a free key, set `GEMINI_MODEL=gemini-3.5-flash GEMINI_THINKING=minimal` in `.env` (3.7/3.8-flash timed out on the free key).
+- `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`): the chat retries on this model when `GEMINI_MODEL` returns 429/503/504. The free tier allows 5 requests/min per model and a checkout uses up to 4, so back-to-back rehearsals on a free key hit it.
+- `GEMINI_WEB_MODEL` (default `gemini-3.5-flash-lite`, ~1 s): model for the page-reading checks in `sales.py`
 - `ANTHROPIC_API_KEY`, `EXECUTOR_MODEL` (default `claude-sonnet-5-5`), `ADVISOR_MODEL` (default `claude-opus-5-5`), `USE_ADVISOR` (default `1`; Claude advisor tool, beta `advisor-tool-2026-03-01`, used only for the final verdict so questions stay fast). Claude requests also enable server-side refusal fallbacks (`fallbacks: "default"`).
 - `REVIEW_MODEL` (default `claude-opus-5-5`): model for the budget review; needs `ANTHROPIC_API_KEY`
+- `SCRAPE_AI` (default `auto`): when the web-scraping checks (`/sale`, `/cart` in `sales.py`) call the LLM. `auto` = free local check first, LLM only when it isn't sure (lone "Sale" word, struck prices with no stated offer, cart missing a number or two local readers disagreeing); `always`; `never`. The checkout chat always uses the LLM.
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
 - `SERIAL_BAUD` (default `115200`)
@@ -162,9 +180,9 @@ Run:
 
 ```
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install fastapi uvicorn pyserial google-genai anthropic websockets faster-whisper sounddevice numpy mediapipe opencv-python pyobjc-framework-AVFoundation
-export GEMINI_API_KEY=...
-uvicorn brain:app --port 8000
+pip install -r requirements.txt
+python -m playwright install chromium   # only needed for bot/
+uvicorn brain:app --port 8000   # with the Vertex settings exported or in .env
 ```
 
 Test without the bot: `LISTEN=0 uvicorn brain:app --port 8000`, then `python test_client.py "Smart toaster" 400 kitchen` (add `--auto` for canned answers). Open `http://localhost:8000/` for the dashboard. `GET /health` shows the LLM provider, the store, whether the ESP32 is connected, and the remaining budget.
