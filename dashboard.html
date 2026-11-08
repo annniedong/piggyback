@@ -4,103 +4,235 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Piggyback</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
+  /* Fonts are optional: offline at the venue, the system fallbacks still look fine. */
   :root {
-    --bg: #fdf6f7; --card: #ffffff; --text: #2b2024; --muted: #7a6a70; --line: #ecdfe2;
-    --pink: #e0708e; --pink-soft: #fbe3ea; --green: #2f8a5b; --green-soft: #e1f3e9;
-    --amber: #9a6200; --amber-soft: #fbefd9; --red: #b33a3a; --red-soft: #f9e2e2;
+    --bg: #fff4ec; --card: #ffffff; --ink: #24161c; --muted: #7d6870; --line: #24161c;
+    --pink: #ff6f9c; --pink-deep: #e2477a; --pink-soft: #ffdbe6;
+    --mint: #3fd7a5; --mint-soft: #d4f7ea; --mint-ink: #0f6b4c;
+    --sun: #ffd23f; --sun-soft: #fff1bf; --sun-ink: #8a5a00;
+    --red: #ff5a4e; --red-soft: #ffe0dc; --red-ink: #a3241b;
+    --shadow: 4px 4px 0 var(--line);
+    --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+    --body: "DM Sans", -apple-system, system-ui, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #1b1517; --card: #261e21; --text: #f4eaed; --muted: #b3a2a8; --line: #3a2e32;
-      --pink: #f08ea8; --pink-soft: #4a2732; --green: #7fd3a5; --green-soft: #1f3a2c;
-      --amber: #f0c06a; --amber-soft: #3d3020; --red: #f19a9a; --red-soft: #4a2626;
+      --bg: #1a1216; --card: #261a20; --ink: #fbeef2; --muted: #b8a2ab; --line: #0a0608;
+      --pink: #ff7fa8; --pink-deep: #ff9dbd; --pink-soft: #4a2333;
+      --mint: #4fe0b1; --mint-soft: #173b30; --mint-ink: #8ff0cf;
+      --sun: #ffd84f; --sun-soft: #3d3216; --sun-ink: #ffe28a;
+      --red: #ff7468; --red-soft: #47201d; --red-ink: #ffb0a8;
+      --shadow: 4px 4px 0 #000;
     }
+    .card, .stat, button, input, select { border-color: #4a3640 !important; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 -apple-system, system-ui, sans-serif; }
-  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 16px; }
-  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 26px; font-weight: 600; }
-  h1 span { color: var(--pink); }
-  h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
-  .muted { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-  .stat, .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
-  .stat p { margin: 0; color: var(--muted); font-size: 13px; }
-  .stat b { font-size: 26px; font-weight: 600; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 var(--body);
+    background-image: radial-gradient(color-mix(in srgb, var(--pink) 22%, transparent) 1.2px, transparent 1.2px);
+    background-size: 22px 22px;
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 20px 16px 64px; display: grid; gap: 20px; }
+
+  /* Top bar */
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .logo { font: 800 24px/1 var(--display); letter-spacing: -0.02em; margin: 0; }
+  .logo span { color: var(--pink-deep); }
+  .live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted);
+          background: var(--card); border: 2px solid var(--line); border-radius: 999px; padding: 4px 12px; }
+  .live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--mint); animation: pulse 2s infinite; }
+  .live.off::before { background: var(--red); animation: none; }
+
+  /* Hero: the pig + its opinion */
+  .hero { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center;
+          background: var(--pink); border: 2px solid var(--line); border-radius: 28px; padding: 22px; box-shadow: var(--shadow);
+          position: relative; overflow: hidden; }
+  .hero::after { content: "PUT IT BACK · PUT IT BACK · PUT IT BACK · PUT IT BACK · PUT IT BACK ·";
+                 position: absolute; bottom: 8px; left: 0; white-space: nowrap; font: 800 11px var(--display);
+                 letter-spacing: .18em; color: rgba(36, 22, 28, .25); animation: ticker 18s linear infinite; }
+  .pig { width: 132px; height: 120px; flex: none; }
+  .pig .lid { transform-origin: center; transform-box: fill-box; animation: blink 5s infinite; }
+  .bubble { background: var(--card); color: var(--ink); border: 2px solid var(--line); border-radius: 20px; padding: 14px 18px;
+            position: relative; box-shadow: var(--shadow); }
+  .bubble::before { content: ""; position: absolute; left: -12px; top: 32px; width: 20px; height: 20px; background: var(--card);
+                    border-left: 2px solid var(--line); border-bottom: 2px solid var(--line); transform: rotate(45deg); }
+  .bubble small { font: 700 11px var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--pink-deep); }
+  .bubble p { margin: 2px 0 0; font: 700 clamp(19px, 4vw, 26px)/1.2 var(--display); letter-spacing: -0.01em; }
+
+  /* Stat stickers */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .stat { background: var(--card); border: 2px solid var(--line); border-radius: 20px; padding: 14px 16px; box-shadow: var(--shadow);
+          transition: transform .2s; }
+  .stat:nth-child(1) { transform: rotate(-1.2deg); }
+  .stat:nth-child(2) { transform: rotate(.8deg); background: var(--mint-soft); }
+  .stat:nth-child(3) { transform: rotate(-.6deg); background: var(--sun-soft); }
+  .stat:hover { transform: rotate(0) translateY(-2px); }
+  .stat p { margin: 0; font: 700 12px var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .stat b { display: block; font: 800 clamp(28px, 6vw, 40px)/1.1 var(--display); letter-spacing: -0.03em; margin-top: 4px; }
   .stat small { color: var(--muted); font-size: 13px; }
-  .good { color: var(--green); }
-  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
-  .row:first-of-type { border-top: 0; }
+  .meter { height: 8px; border-radius: 4px; background: var(--pink-soft); margin-top: 8px; overflow: hidden; border: 1.5px solid var(--line); }
+  .meter div { height: 100%; background: var(--pink); transition: width .6s cubic-bezier(.3,1.4,.5,1); }
+  .meter.low div { background: var(--red); }
+
+  /* Cards */
+  .card { background: var(--card); border: 2px solid var(--line); border-radius: 22px; padding: 18px 18px 16px; box-shadow: var(--shadow); }
+  .card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+  h2 { margin: 0; font: 800 22px/1.15 var(--display); letter-spacing: -0.02em; }
+  .tag { font: 700 11px var(--display); letter-spacing: .12em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+         border: 1.5px solid var(--line); background: var(--sun); color: #24161c; }
+  .muted { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0;
+         border-top: 2px dashed color-mix(in srgb, var(--ink) 15%, transparent); flex-wrap: wrap; }
+  .row:first-child { border-top: 0; }
+  .item { font-weight: 700; }
+  .price { font: 800 15px var(--display); background: var(--pink-soft); padding: 1px 8px; border-radius: 6px; margin-left: 4px; white-space: nowrap; }
   .sub { color: var(--muted); font-size: 13px; }
-  .bar { height: 10px; background: var(--pink-soft); border-radius: 5px; margin-top: 6px; overflow: hidden; }
-  .bar div { height: 100%; background: var(--pink); border-radius: 5px; }
-  .goal { padding: 10px 0; border-top: 1px solid var(--line); }
-  .goal:first-of-type { border-top: 0; }
-  .goal-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
-  button, input, select { font: inherit; font-size: 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); padding: 6px 10px; }
-  button { cursor: pointer; }
-  button:hover { border-color: var(--pink); }
-  button.primary { background: var(--pink); border-color: var(--pink); color: #fff; }
-  input { min-width: 0; }
-  form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+  .goal { padding: 12px 0; border-top: 2px dashed color-mix(in srgb, var(--ink) 15%, transparent); }
+  .goal:first-child { border-top: 0; }
+  .goal-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+  .bar { height: 16px; background: var(--mint-soft); border-radius: 8px; margin-top: 8px; overflow: hidden; border: 2px solid var(--line); position: relative; }
+  .bar div { height: 100%; background: repeating-linear-gradient(-45deg, var(--mint), var(--mint) 8px, color-mix(in srgb, var(--mint) 80%, #fff) 8px, color-mix(in srgb, var(--mint) 80%, #fff) 16px);
+             transition: width .6s cubic-bezier(.3,1.4,.5,1); }
+  .bar span { position: absolute; right: 8px; top: -1px; font: 800 11px/16px var(--display); color: var(--ink); }
+
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  button, input, select { font: inherit; font-size: 14px; border-radius: 12px; border: 2px solid var(--line); background: var(--card); color: var(--ink); padding: 7px 12px; }
+  input, select { min-width: 0; }
+  input:focus, select:focus { outline: 3px solid color-mix(in srgb, var(--pink) 50%, transparent); outline-offset: 1px; }
+  button { cursor: pointer; font-weight: 700; box-shadow: 2px 2px 0 var(--line); transition: transform .08s, box-shadow .08s; }
+  button:hover { transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--line); }
+  button:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--line); }
+  button.primary { background: var(--pink); color: #24161c; }
+  button.go { background: var(--mint); color: #24161c; }
+  button.ghost { box-shadow: none; border-style: dashed; color: var(--muted); }
+  button.ghost:hover { transform: none; color: var(--red-ink); border-color: var(--red); }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
   form input[name=name] { flex: 2 1 160px; }
   form input[type=number], form input[type=date] { flex: 1 1 110px; }
-  .pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
-  .release { background: var(--green-soft); color: var(--green); }
-  .timer { background: var(--amber-soft); color: var(--amber); }
-  .escalate { background: var(--red-soft); color: var(--red); }
-  .empty { color: var(--muted); font-size: 14px; margin: 0; }
-  .error { color: var(--red); font-size: 13px; margin: 8px 0 0; }
+  .budget-form { margin: 0; align-items: center; }
+  .budget-form label { font-weight: 700; }
+  .dollar { position: relative; flex: 1 1 140px; }
+  .dollar::before { content: "$"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-weight: 700; color: var(--muted); }
+  .dollar input { width: 100%; padding-left: 24px; }
+
+  /* Verdict stamps */
+  .stamp { font: 800 11px var(--display); letter-spacing: .1em; text-transform: uppercase; padding: 4px 10px; border-radius: 8px;
+           border: 2px solid currentColor; white-space: nowrap; transform: rotate(-3deg); display: inline-block; }
+  .release { background: var(--mint-soft); color: var(--mint-ink); }
+  .timer { background: var(--sun-soft); color: var(--sun-ink); transform: rotate(2deg); }
+  .escalate { background: var(--red-soft); color: var(--red-ink); transform: rotate(-5deg); }
   q { font-style: italic; }
+  q::before, q::after { color: var(--pink-deep); font-weight: 700; }
+
+  .empty { color: var(--muted); font-size: 14px; margin: 0; padding: 14px; border: 2px dashed color-mix(in srgb, var(--ink) 20%, transparent);
+           border-radius: 14px; text-align: center; }
+  .error { color: var(--red-ink); font-size: 13px; margin: 8px 0 0; font-weight: 700; }
+  footer { text-align: center; color: var(--muted); font-size: 13px; }
+  footer b { font-family: var(--display); color: var(--pink-deep); }
+
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mint) 60%, transparent); } 50% { box-shadow: 0 0 0 5px transparent; } }
+  @keyframes blink { 0%, 94%, 100% { transform: scaleY(0); } 96% { transform: scaleY(1); } }
+  @keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+  @media (max-width: 640px) {
+    .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 18px 16px 30px; }
+    .bubble::before { left: 50%; top: -12px; transform: translateX(-50%) rotate(135deg); }
+    .pig { width: 108px; height: 98px; }
+    .stats { grid-template-columns: 1fr; }
+    .stat { transform: none !important; }
+    .two { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <header>
-    <h1>Piggy<span>back</span></h1>
-    <span class="sub" id="status">Loading…</span>
-  </header>
+  <div class="top">
+    <h1 class="logo">Piggy<span>back</span></h1>
+    <span class="live" id="status">Loading…</span>
+  </div>
+
+  <section class="hero" aria-live="polite">
+    <svg class="pig" viewBox="0 0 132 120" aria-hidden="true">
+      <path d="M22 30 L14 4 L44 18 Z M110 30 L118 4 L88 18 Z" fill="#ffb3c9" stroke="#24161c" stroke-width="3" stroke-linejoin="round"/>
+      <rect x="8" y="14" width="116" height="100" rx="44" fill="#ffc4d6" stroke="#24161c" stroke-width="3"/>
+      <!-- OLED eyes, like the real ones -->
+      <rect x="24" y="36" width="36" height="26" rx="6" fill="#111" stroke="#24161c" stroke-width="3"/>
+      <rect x="72" y="36" width="36" height="26" rx="6" fill="#111" stroke="#24161c" stroke-width="3"/>
+      <g id="pupils">
+        <circle cx="42" cy="49" r="7" fill="#e9f6ff"/>
+        <circle cx="90" cy="49" r="7" fill="#e9f6ff"/>
+      </g>
+      <g id="brows"></g>
+      <rect class="lid" x="25" y="37" width="34" height="24" rx="4" fill="#111"/>
+      <rect class="lid" x="73" y="37" width="34" height="24" rx="4" fill="#111"/>
+      <ellipse cx="66" cy="86" rx="22" ry="15" fill="#ff8fb1" stroke="#24161c" stroke-width="3"/>
+      <ellipse cx="58" cy="86" rx="4" ry="6" fill="#24161c"/>
+      <ellipse cx="74" cy="86" rx="4" ry="6" fill="#24161c"/>
+      <rect x="54" y="6" width="24" height="7" rx="3.5" fill="#24161c"/>
+    </svg>
+    <div class="bubble">
+      <small id="mood-tag">Piggyback says</small>
+      <p id="mood">Hold on, I'm counting.</p>
+    </div>
+  </section>
 
   <section class="stats">
-    <div class="stat"><p>Left this month</p><b id="remaining">–</b> <small id="budget-of"></small></div>
-    <div class="stat"><p>Saved by putting it back</p><b class="good" id="saved">–</b></div>
-    <div class="stat"><p>Arguments won</p><b id="won">–</b> <small id="won-of"></small></div>
+    <div class="stat">
+      <p>Left this month</p>
+      <b id="remaining">–</b>
+      <small id="budget-of"></small>
+      <div class="meter" id="meter"><div style="width:0"></div></div>
+    </div>
+    <div class="stat"><p>Saved by putting it back</p><b id="saved">–</b><small>money you didn't spend. Nice.</small></div>
+    <div class="stat"><p>Arguments won</p><b id="won">–</b><small id="won-of"></small></div>
   </section>
 
   <section class="card">
-    <h2>Saving for</h2>
-    <p class="muted">Piggyback weighs every purchase against these.</p>
-    <div id="goals"></div>
-    <form id="goal-form">
-      <input name="name" placeholder="Spring break trip" required>
-      <input name="target" type="number" min="1" step="1" placeholder="Target $" required>
-      <input name="deadline" type="date" aria-label="Deadline (optional)">
-      <button class="primary">Add goal</button>
-    </form>
-    <p class="error" id="goal-error" hidden></p>
-  </section>
-
-  <section class="card">
-    <h2>Waiting room</h2>
-    <p class="muted">Things Piggyback made you wait on. Still want them?</p>
+    <div class="card-head"><h2>Waiting room</h2><span class="tag">Cooling off</span></div>
+    <p class="muted">Stuff I made you sleep on. Still want it, or do we let it go?</p>
     <div id="waiting"></div>
   </section>
 
-  <section class="card">
-    <h2>Recent arguments</h2>
-    <div id="arguments"></div>
-  </section>
+  <div class="two">
+    <section class="card">
+      <div class="card-head"><h2>Saving for</h2></div>
+      <p class="muted">I weigh every purchase against these. Choose wisely.</p>
+      <div id="goals"></div>
+      <form id="goal-form">
+        <input name="name" placeholder="Spring break trip" required>
+        <input name="target" type="number" min="1" step="1" placeholder="Target $" required>
+        <input name="deadline" type="date" aria-label="Deadline (optional)">
+        <button class="go">Add goal</button>
+      </form>
+      <p class="error" id="goal-error" hidden></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>The receipts</h2></div>
+      <p class="muted">Recent arguments, and how they went.</p>
+      <div id="arguments"></div>
+    </section>
+  </div>
 
   <section class="card">
-    <h2>Monthly budget</h2>
-    <form id="budget-form">
-      <input name="budget" type="number" min="1" step="1" aria-label="Monthly budget in dollars" required>
-      <button>Save budget</button>
+    <form id="budget-form" class="budget-form">
+      <label for="budget-input">Monthly budget</label>
+      <span class="dollar"><input id="budget-input" name="budget" type="number" min="1" step="1" required></span>
+      <button>Save</button>
     </form>
   </section>
+
+  <footer>Digital money is invisible. I'm not. <b>Put it back.</b></footer>
 </main>
 
 <script>
@@ -112,6 +244,7 @@ const ago = (stamp) => {
   const days = Math.floor((Date.now() - new Date(stamp)) / 86400000);
   return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
 };
+const STAMPS = {release: "Approved", timer: "Cool off", escalate: "Tattled"};
 let state = null;
 
 async function api(path, method = "GET", body) {
@@ -121,52 +254,80 @@ async function api(path, method = "GET", body) {
   return res.json();
 }
 
+// The pig's opinion of your month, plus matching eyebrows.
+function mood(s) {
+  const left = s.monthly_budget ? s.remaining / s.monthly_budget : 1;
+  const waiting = s.waiting.filter((w) => w.status !== "bought").length;
+  if (s.remaining < 0) return ["Red alert", `You're ${money(-s.remaining)} over. I'm not mad. I'm disappointed.`, "sad"];
+  if (left < 0.15) return ["Budget check", `${money(s.remaining)} left. Wallet's on a diet now.`, "mad"];
+  if (waiting >= 2) return ["Waiting room", `${waiting} things in the waiting room. Do you still miss them?`, "sus"];
+  if (s.saved_by_letting_go > 0) return ["Proud pig", `You've kept ${money(s.saved_by_letting_go)} by putting stuff back. Look at you.`, "happy"];
+  if (left < 0.5) return ["Heads up", "Past the halfway mark. I'm watching that cart.", "sus"];
+  return ["All good", "Plenty left. Doesn't mean you need another hoodie.", "happy"];
+}
+const BROWS = {
+  happy: "",
+  sus: `<path d="M24 30 L58 34 M74 34 L108 30" stroke="#24161c" stroke-width="4" stroke-linecap="round"/>`,
+  mad: `<path d="M24 26 L58 36 M74 36 L108 26" stroke="#24161c" stroke-width="4" stroke-linecap="round"/>`,
+  sad: `<path d="M24 36 L58 28 M74 28 L108 36" stroke="#24161c" stroke-width="4" stroke-linecap="round"/>`,
+};
+
 function render(s) {
   state = s;
   $("remaining").textContent = money(s.remaining);
   $("budget-of").textContent = "of " + money(s.monthly_budget);
+  const pct = s.monthly_budget ? Math.max(0, Math.min(100, 100 * s.remaining / s.monthly_budget)) : 0;
+  $("meter").firstElementChild.style.width = pct + "%";
+  $("meter").classList.toggle("low", pct < 15);
   $("saved").textContent = money(s.saved_by_letting_go);
   $("won").textContent = s.arguments_won;
-  $("won-of").textContent = "of " + s.arguments_total;
-  if (document.activeElement?.name !== "budget") document.querySelector("#budget-form input").value = s.monthly_budget;
+  $("won-of").textContent = `of ${s.arguments_total}. ${s.arguments_total && s.arguments_won / s.arguments_total > 0.5 ? "Okay, lawyer." : "I'm undefeated-ish."}`;
+  if (document.activeElement?.name !== "budget") $("budget-input").value = s.monthly_budget;
+
+  const [tag, line, face] = mood(s);
+  $("mood-tag").textContent = tag;
+  $("mood").textContent = line;
+  $("brows").innerHTML = BROWS[face];
 
   $("goals").innerHTML = s.goals.length ? s.goals.map((g) => {
     const pct = Math.min(100, Math.round(100 * g.saved / g.target));
     return `<div class="goal">
-      <div class="goal-head"><span>${esc(g.name)}</span>
+      <div class="goal-head"><span class="item">${esc(g.name)}</span>
         <span class="sub">${money(g.saved)} / ${money(g.target)}${g.deadline ? " · by " + esc(g.deadline) : ""}</span></div>
-      <div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="bar"><div style="width:${pct}%"></div><span>${pct}%</span></div>
       <div class="actions">
         <input type="number" step="1" placeholder="$" aria-label="Amount" style="width:90px" data-amount="${g.id}">
-        <button data-save="${g.id}">Add savings</button>
-        <button data-delete="${g.id}">Remove</button>
+        <button class="go" data-save="${g.id}">Add savings</button>
+        <button class="ghost" data-delete="${g.id}">Remove</button>
       </div></div>`;
-  }).join("") : `<p class="empty">Add a goal so Piggyback has something to protect.</p>`;
+  }).join("") : `<p class="empty">No goals yet. Give me something to protect.</p>`;
 
   const goalOptions = `<option value="">Just let it go</option>` +
     s.goals.map((g) => `<option value="${g.id}">Put it toward ${esc(g.name)}</option>`).join("");
   $("waiting").innerHTML = s.waiting.length ? s.waiting.map((w) => `<div class="row">
-      <span>${esc(w.item)} · ${money(w.price)}<br>
-        <span class="sub">Tried ${w.tries} time${w.tries === 1 ? "" : "s"} · first wanted ${ago(w.first_wanted)}${w.status === "still_want" ? " · you still want it" : ""}</span></span>
+      <span><span class="item">${esc(w.item)}</span><span class="price">${money(w.price)}</span><br>
+        <span class="sub">Tried ${w.tries} time${w.tries === 1 ? "" : "s"}${w.tries >= 3 ? " (seriously?)" : ""} · first wanted ${ago(w.first_wanted)}${w.status === "still_want" ? " · you still want it" : ""}</span></span>
       <span class="actions" style="margin:0">
         <select data-goal-for="${w.id}" aria-label="Where the money goes">${goalOptions}</select>
         <button class="primary" data-letgo="${w.id}">Let it go</button>
         <button data-still="${w.id}">Still want</button>
-      </span></div>`).join("") : `<p class="empty">Nothing waiting. Piggyback is proud of you, for now.</p>`;
+      </span></div>`).join("") : `<p class="empty">Nothing waiting. I'm proud of you. For now.</p>`;
 
   $("arguments").innerHTML = s.arguments.length ? s.arguments.map((a) => `<div class="row">
-      <span>${esc(a.item)} · ${money(a.price)}<br>
+      <span><span class="item">${esc(a.item)}</span><span class="price">${money(a.price)}</span><br>
         <span class="sub">${a.said.length ? `<q>${esc(a.said.reduce((x, y) => y.length > x.length ? y : x))}</q> · ` : ""}${ago(a.time)}</span></span>
-      <span class="pill ${esc(a.verdict)}">${esc(a.verdict)}${a.need && a.need !== "unclear" ? " · " + esc(a.need) : ""}</span>
-    </div>`).join("") : `<p class="empty">No arguments yet. Go to a checkout page.</p>`;
+      <span class="stamp ${esc(a.verdict)}">${esc(STAMPS[a.verdict] || a.verdict)}${a.need && a.need !== "unclear" ? " · " + esc(a.need) : ""}</span>
+    </div>`).join("") : `<p class="empty">No arguments yet. Go try to buy something. I dare you.</p>`;
 }
 
 async function refresh() {
   try {
     render(await api("/profile"));
-    $("status").textContent = "Updated " + new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+    $("status").textContent = "Watching · " + new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+    $("status").classList.remove("off");
   } catch (e) {
     $("status").textContent = "Can't reach Piggyback";
+    $("status").classList.add("off");
   }
 }
 
@@ -197,7 +358,7 @@ $("goal-form").addEventListener("submit", async (e) => {
   const f = new FormData(e.target);
   const err = $("goal-error");
   if (!f.get("name").trim() || !(Number(f.get("target")) > 0)) {
-    err.textContent = "Enter a name and a target above $0."; err.hidden = false; return;
+    err.textContent = "Give it a name and a target above $0."; err.hidden = false; return;
   }
   err.hidden = true;
   await act("/goals", "POST", {name: f.get("name").trim(), target: Number(f.get("target")), deadline: f.get("deadline") || null});
@@ -207,6 +368,15 @@ $("goal-form").addEventListener("submit", async (e) => {
 $("budget-form").addEventListener("submit", (e) => {
   e.preventDefault();
   act("/budget", "PUT", {monthly_budget: Number(new FormData(e.target).get("budget"))});
+});
+
+// The pig's pupils follow your cursor, like the real one follows your face.
+const pupils = document.querySelectorAll("#pupils circle");
+document.addEventListener("pointermove", (e) => {
+  const box = document.querySelector(".pig").getBoundingClientRect();
+  const dx = Math.max(-1, Math.min(1, (e.clientX - (box.left + box.width / 2)) / 300));
+  const dy = Math.max(-1, Math.min(1, (e.clientY - (box.top + box.height / 2)) / 300));
+  pupils.forEach((p) => p.setAttribute("transform", `translate(${dx * 9} ${dy * 5})`));
 });
 
 refresh();
