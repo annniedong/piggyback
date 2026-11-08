@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, HttpUrl
 
 import store
 import sales
+import tiger
 from sales import load_env_file
 from sales import router as sales_router
 from vision import vision
@@ -48,9 +49,13 @@ VOICE = os.getenv("VOICE")  # None = system default voice
 SPEECH_RATE = int(os.getenv("SPEECH_RATE", "215"))  # words per minute for `say` (macOS default is about 180)
 END_PAUSE = float(os.getenv("END_PAUSE", "0.8"))  # seconds of quiet that end a spoken answer
 TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
+# Judging table: the extension never places a real order, and the profile goes back to the seeded demo
+# for each visitor (the dashboard's "Next visitor" button, or by itself after DEMO_RESET_MINUTES idle).
+DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
+DEMO_RESET_MINUTES = float(os.getenv("DEMO_RESET_MINUTES", "10"))
 LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
-SPEAKER = os.getenv("SPEAKER", "jbl")  # Piggyback's voice: the first audio output whose name contains this
+SPEAKER = os.getenv("SPEAKER", "macbook")  # Piggyback's voice: the first audio output whose name contains this
 MIC_DEVICE = os.getenv("MIC_DEVICE", "macbook")  # the laptop's own mic; picked by name so iPhone/AirPods mics can't take over
 MAX_LISTEN_SECONDS = float(os.getenv("MAX_LISTEN_SECONDS", "8"))
 NO_SPEECH_SECONDS = float(os.getenv("NO_SPEECH_SECONDS", "6"))
@@ -70,7 +75,7 @@ QUESTIONS_BY_TIER = {"easy": 2, "close": 3, "over": 3}
 LOOK_AWAY_GRACE = float(os.getenv("LOOK_AWAY_GRACE", "0.6"))  # seconds of looking away that breaks an answer
 
 HERE = Path(__file__).parent
-DECISIONS_FILE = HERE / "decisions.jsonl"
+DECISIONS_FILE = Path(os.getenv("DECISIONS_FILE", HERE / "decisions.jsonl"))  # tests point this elsewhere
 
 EXPRESSIONS = ["idle", "alert", "suspicious", "skeptical", "satisfied", "disappointed", "thinking"]
 # How long tracking waits after an expression so its head turns can play (matches the steps in pig_eyes.ino).
@@ -763,6 +768,9 @@ class AddedToBag(BaseModel):
 REMARK_PROMPT = """You are Piggyback, a robot piggy bank: warm, playful, a little cheeky. The user just put
 something in their shopping bag. Say ONE quick spoken line, under 12 words, reacting to it, and hint that
 you'll talk about it at checkout. Don't ask a question they need to answer yet. No lecture, no emoji.
+If an ad brought them to this site, that's the joke: they got distracted by an ad (like "Ooh, this was
+from an ad, wasn't it? You got distracted."); up to 14 words then. Otherwise you can poke at a sale or
+countdown that's rushing them.
 Reply with JSON: line, expression (one of idle, alert, suspicious, skeptical, satisfied, disappointed, thinking)."""
 
 REMARK_SCHEMA = {
@@ -774,16 +782,23 @@ REMARK_SCHEMA = {
 
 REMARK_LINES = ["Ooh, into the bag. We'll talk at checkout.", "I saw that. We'll chat at checkout.",
                 "Noted. Save some arguments for checkout."]
+AD_REMARK_LINES = ["Ooh, this was from an ad, wasn't it? You got distracted.",
+                   "An ad brought you here. Distracted much? We'll talk at checkout.",
+                   "Saw an ad, now it's in the bag? We'll chat at checkout."]
 _last_remark = 0.0
 
 
 async def quick_remark(added: AddedToBag) -> dict:
-    default = {"line": random.choice(REMARK_LINES), "expression": "suspicious"}
+    ad = sales.ad_source(str(added.website))
+    default = {"line": random.choice(AD_REMARK_LINES if ad else REMARK_LINES), "expression": "suspicious"}
     if LLM_PROVIDER != "gemini":
         return default
     remaining = store.remaining(store.load())
     price = f" for ${added.price:,.2f}" if added.price else ""
     prompt = f"They added: {added.item}{price}. ${remaining:.0f} left in this month's budget."
+    seen = sales.seen_on(str(added.website))
+    if seen:
+        prompt += "\nWhat you noticed on this site:\n" + seen
     try:
         text = await asyncio.wait_for(ask_gemini(prompt, system=REMARK_PROMPT, schema=REMARK_SCHEMA, fast=True), 2.5)
     except Exception as e:
@@ -799,6 +814,8 @@ async def added_to_bag(added: AddedToBag):
     global _last_remark
     log("Added to bag:", added.model_dump(mode="json"))
     sales.note_added(str(added.website), added.item, added.price)
+    visitor_activity()
+    tiger.event("added", item=added.item, price=added.price, website=str(added.website))
     session = tracking["session"]
     if (session and not session["done"]) or time.time() - _last_remark < 5:
         return {"ok": True, "line": None}  # mid-argument, or a double click
@@ -842,7 +859,19 @@ async def review(speak_it: bool = False):
 def health():
     return {"ok": True, "llm": LLM_PROVIDER, "listening": LISTEN, "esp32": head.connected(),
             "vision": vision.state["running"], "camera": vision.state["camera"], "speaker": pick_speaker()[1],
-            "store": store.STORE, "remaining": store.remaining(store.load())}
+            "store": store.STORE, "remaining": store.remaining(store.load()),
+            "tiger": {k: tiger.state[k] for k in ("connected", "written", "dropped", "error")}, "demo": DEMO_MODE}
+
+
+@app.get("/trends")
+def trends():
+    """History from Tiger Data for the dashboard: eye contact per argument, money per day, checkouts by hour."""
+    try:
+        data = tiger.trends()
+    except Exception as e:
+        log("Trends query failed:", repr(e))
+        return {"enabled": True, "error": repr(e)}
+    return {"enabled": False} if data is None else {"enabled": True, **data}
 
 
 # ---------------------------------------------------------------- profile API (dashboard)
@@ -873,6 +902,47 @@ def change_profile(fn, *args):
             fn(p, *args)
     except KeyError as e:
         raise HTTPException(404, f"not found: {e}")
+    visitor_activity()
+    return store.summary(store.load())
+
+
+# ---------------------------------------------------------------- demo mode (judging table)
+demo = {"last_activity": 0.0, "dirty": False}
+
+
+def visitor_activity():
+    demo["last_activity"], demo["dirty"] = time.time(), True
+
+
+def reset_demo():
+    """Back to the seeded demo profile and decisions for the next visitor. Tiger Data keeps everyone's
+    history, so the dashboard's stare history fills up over the day."""
+    import seed_demo
+
+    fresh = seed_demo.build_profile()
+    with store.edit() as p:
+        p.clear()
+        p.update(fresh)
+    DECISIONS_FILE.write_text("".join(json.dumps(d) + "\n" for d in seed_demo.decisions()))
+    sales._seen.clear()  # what the last visitor's browsing showed (ads, carts) isn't this visitor's
+    demo["dirty"] = False
+    log("Demo: reset for the next visitor")
+
+
+async def demo_auto_reset():
+    while True:
+        await asyncio.sleep(min(30, DEMO_RESET_MINUTES * 20))  # checks 3x per idle period, at most every 30 s
+        if demo["dirty"] and not engaged() and time.time() - demo["last_activity"] > DEMO_RESET_MINUTES * 60:
+            reset_demo()
+
+
+@app.post("/demo/reset")
+def demo_reset():
+    if not DEMO_MODE:
+        raise HTTPException(403, "only in demo mode (DEMO_MODE=1): this replaces the profile")
+    if tracking["session"] and not tracking["session"]["done"]:
+        raise HTTPException(409, "an argument is going on")
+    reset_demo()
     return store.summary(store.load())
 
 
@@ -912,6 +982,9 @@ def delete_goal(goal_id: str):
 
 @app.post("/waiting/{waiting_id}/let_go")
 def let_go(waiting_id: str, body: LetGo):
+    w = next((w for w in store.load()["waiting"] if w["id"] == waiting_id), None)
+    if w and w["status"] in ("waiting", "still_want"):
+        tiger.event("let_go", item=w["item"], price=w["price"], category=w.get("category"), goal_id=body.goal_id)
     return change_profile(store.let_go, waiting_id, body.goal_id)
 
 
@@ -940,6 +1013,10 @@ async def warm_up():
         asyncio.create_task(asyncio.to_thread(whisper_model))
     if VISION:
         vision.start()
+    tiger.start(store.load())
+    if DEMO_MODE:
+        log(f"Demo mode: no real orders; the profile resets for each visitor (or after {DEMO_RESET_MINUTES:g} idle minutes)")
+        asyncio.create_task(demo_auto_reset())
     asyncio.create_task(track_user())  # also turns the head away when idle, camera or not
 
 
@@ -963,6 +1040,9 @@ async def track_user():
         s = vision.state
         if not s["running"]:
             continue
+        session = tracking["session"]
+        if session and not session["done"]:
+            tiger.gaze(session["id"], s, tracking["recording"])  # eye contact through the argument, for history
         if s["present"]:
             ex, ey = s["face_x"] - 0.5, s["face_y"] - 0.5  # face offset from image center, -0.5..0.5
             gaze = [round(ex * 2 * (-1 if GAZE_INVERT_X else 1), 2), round(ey * 2, 2)]
@@ -1062,10 +1142,13 @@ async def next_turn(ws: WebSocket, session: dict, pending: "asyncio.Task | None"
                            reply.get("need", "unclear"), said)
     session["done"] = True
     session["verdict"] = verdict
+    tiger.event("verdict", session["id"], session["item"], session["price"], session["category"], verdict,
+                rule=rule, need=reply.get("need", "unclear"), llm_verdict=reply["verdict"], tier=session["tier"],
+                strikes=session["strikes"], clean=clean)
     await say_and_show(ws, reply, {
         "type": "verdict", "verdict": verdict,
         "seconds": TIMER_SECONDS if verdict == "timer" else 0,
-        "line": reply["line"], "rule": rule,
+        "line": reply["line"], "rule": rule, "demo": DEMO_MODE,
     })
 
 
@@ -1150,6 +1233,8 @@ async def ws_endpoint(ws: WebSocket):
             kind = msg.get("type")
             log("Bot >", msg)
 
+            if kind in ("checkout", "answer", "decision"):
+                visitor_activity()
             if kind == "checkout":
                 if session:
                     session["done"] = True  # stop any listener from the previous purchase
@@ -1158,6 +1243,7 @@ async def ws_endpoint(ws: WebSocket):
                     store.note_checkout(p, str(msg.get("item", "something")), price)
                     tier = budget_tier(price, store.remaining(p))
                 session = tracking["session"] = {
+                    "id": store.new_id(),
                     "item": str(msg.get("item", "something")),
                     "price": price,
                     "category": str(msg.get("category", "other")),
@@ -1169,6 +1255,7 @@ async def ws_endpoint(ws: WebSocket):
                     "strikes": 0, "failed": False, "verified": True, "answered_all": True,
                 }
                 log(f"Budget tier: {tier} ({session['total']} questions)")
+                tiger.event("checkout", session["id"], session["item"], price, session["category"], tier=tier)
                 await turn_to_user()  # usually already facing them from the add-to-bag remark
                 await head.expr("alert")
                 # Start the AI now so it runs while the alert pose lands (saves ~0.6 s).
@@ -1190,11 +1277,16 @@ async def ws_endpoint(ws: WebSocket):
                     record["verdict"] = session["verdict"]
                 with DECISIONS_FILE.open("a") as f:
                     f.write(json.dumps(record) + "\n")
+                item = str(msg.get("item") or (session["item"] if session else "something"))
+                price = float(msg.get("price", session["price"] if session else 0))
+                category = session["category"] if session else "other"
+                sid, verdict = (session["id"], session["verdict"]) if session else (None, None)
+                tiger.event("decision", sid, item, price, category, verdict, outcome=msg.get("outcome"),
+                            seconds_on_page=msg.get("seconds_on_page"))
                 if msg.get("outcome") == "completed":
+                    tiger.event("purchase", sid, item, price, category, verdict)
                     with store.edit() as p:
-                        store.note_purchase(p, str(msg.get("item") or (session["item"] if session else "something")),
-                                            float(msg.get("price", session["price"] if session else 0)),
-                                            session["category"] if session else "other")
+                        store.note_purchase(p, item, price, category)
                 bought_anyway = session and msg.get("outcome") == "completed" and session["verdict"] in ("timer", "escalate")
                 if session:
                     session["done"] = True
@@ -1214,5 +1306,10 @@ async def ws_endpoint(ws: WebSocket):
         log("Bot disconnected")
         if session:
             session["done"] = True
-        tracking["session"] = None
-        await head.expr("idle")
+        if tracking["session"] is session:  # don't end a checkout that started on another connection
+            tracking["session"] = None
+        # The extension closes ~0.3 s after a decision: let "You went for it anyway" and its head shake finish.
+        await done_speaking()
+        await asyncio.sleep(min(max(tracking["paused_until"] - time.time(), 0), 6))
+        if tracking["session"] is None:
+            await head.expr("idle")

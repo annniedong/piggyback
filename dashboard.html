@@ -51,9 +51,9 @@
 
   /* Hero: the pig + its opinion */
   .hero { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center;
-          background: var(--pink); border: 2px solid var(--line); border-radius: 28px; padding: 22px; box-shadow: var(--shadow);
+          background: var(--pink); border: 2px solid var(--line); border-radius: 28px; padding: 22px 22px 36px; box-shadow: var(--shadow);
           position: relative; overflow: hidden; }
-  .hero::after { content: "PUT IT BACK · PUT IT BACK · PUT IT BACK · PUT IT BACK · PUT IT BACK ·";
+  .hero::after { content: "PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · ";
                  position: absolute; bottom: 8px; left: 0; white-space: nowrap; font: 800 11px var(--display);
                  letter-spacing: .18em; color: rgba(36, 22, 28, .25); animation: ticker 18s linear infinite; }
   .pig { width: 132px; height: 120px; flex: none; }
@@ -124,6 +124,13 @@
   .dollar::before { content: "$"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-weight: 700; color: var(--muted); }
   .dollar input { width: 100%; padding-left: 24px; }
 
+  details.manage { margin-top: 10px; }
+  details.manage summary { cursor: pointer; font-size: 13px; font-weight: 700; color: var(--muted); list-style: none; }
+  details.manage summary::-webkit-details-marker { display: none; }
+  details.manage summary::before { content: "+ "; }
+  details.manage[open] summary::before { content: "− "; }
+  .goal .actions { margin-top: 8px; }
+
   /* Verdict stamps */
   .stamp { font: 800 11px var(--display); letter-spacing: .1em; text-transform: uppercase; padding: 4px 10px; border-radius: 8px;
            border: 2px solid currentColor; white-space: nowrap; transform: rotate(-3deg); display: inline-block; }
@@ -132,6 +139,24 @@
   .escalate { background: var(--red-soft); color: var(--red-ink); transform: rotate(-5deg); }
   q { font-style: italic; }
   q::before, q::after { color: var(--pink-deep); font-weight: 700; }
+
+  /* History (Tiger Data) */
+  .minis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px 0 14px; }
+  .mini { border: 2px solid var(--line); border-radius: 14px; padding: 8px 12px; background: var(--bg); }
+  .mini b { display: block; font: 800 22px/1.1 var(--display); letter-spacing: -0.02em; }
+  .mini span { font-size: 12px; color: var(--muted); }
+  h3 { margin: 16px 0 6px; font: 800 15px var(--display); }
+  .eye { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, 1.3fr) 96px; gap: 10px; align-items: center; padding: 6px 0; }
+  .eye .stamp { justify-self: end; }
+  .eye .item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eye .bar { margin: 0; }
+  .eye .bar div { background: var(--pink); }
+  .days { display: flex; align-items: flex-end; gap: 3px; height: 110px; border-bottom: 2px solid var(--line); }
+  .days > div { flex: 1; display: flex; flex-direction: column-reverse; gap: 1px; min-width: 0; height: 100%; }
+  .days .spent { background: var(--pink); border-radius: 3px 3px 0 0; }
+  .days .saved { background: var(--mint); border-radius: 3px 3px 0 0; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 
   .empty { color: var(--muted); font-size: 14px; margin: 0; padding: 14px; border: 2px dashed color-mix(in srgb, var(--ink) 20%, transparent);
            border-radius: 14px; text-align: center; }
@@ -145,12 +170,14 @@
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
   @media (max-width: 640px) {
-    .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 18px 16px 30px; }
+    .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 18px 16px 40px; }
     .bubble::before { left: 50%; top: -12px; transform: translateX(-50%) rotate(135deg); }
     .pig { width: 108px; height: 98px; }
     .stats { grid-template-columns: 1fr; }
     .stat { transform: none !important; }
     .two { grid-template-columns: 1fr; }
+    .minis { grid-template-columns: 1fr 1fr; }
+    .mini:last-child { grid-column: span 2; }
   }
 </style>
 </head>
@@ -158,7 +185,10 @@
 <main>
   <div class="top">
     <h1 class="logo">Piggy<span>back</span></h1>
-    <span class="live" id="status">Loading…</span>
+    <span style="display:flex; gap:8px; align-items:center">
+      <button id="next-visitor" hidden title="Back to the demo budget, goals and waiting room">↺ Next visitor</button>
+      <span class="live" id="status">Loading…</span>
+    </span>
   </div>
 
   <section class="hero" aria-live="polite">
@@ -193,36 +223,52 @@
       <small id="budget-of"></small>
       <div class="meter" id="meter"><div style="width:0"></div></div>
     </div>
-    <div class="stat"><p>Saved by putting it back</p><b id="saved">–</b><small>money you didn't spend. Nice.</small></div>
+    <div class="stat"><p>Saved by putting it back</p><b id="saved">–</b><small>not spent</small></div>
     <div class="stat"><p>Arguments won</p><b id="won">–</b><small id="won-of"></small></div>
   </section>
 
   <section class="card">
     <div class="card-head"><h2>Waiting room</h2><span class="tag">Cooling off</span></div>
-    <p class="muted">Stuff I made you sleep on. Still want it, or do we let it go?</p>
     <div id="waiting"></div>
   </section>
 
   <div class="two">
     <section class="card">
       <div class="card-head"><h2>Saving for</h2></div>
-      <p class="muted">I weigh every purchase against these. Choose wisely.</p>
       <div id="goals"></div>
-      <form id="goal-form">
-        <input name="name" placeholder="Spring break trip" required>
-        <input name="target" type="number" min="1" step="1" placeholder="Target $" required>
-        <input name="deadline" type="date" aria-label="Deadline (optional)">
-        <button class="go">Add goal</button>
-      </form>
-      <p class="error" id="goal-error" hidden></p>
+      <details class="manage" id="goals-manage">
+        <summary>Manage</summary>
+        <div id="goal-actions"></div>
+        <form id="goal-form">
+          <input name="name" placeholder="New goal" required>
+          <input name="target" type="number" min="1" step="1" placeholder="Target $" required>
+          <input name="deadline" type="date" aria-label="Deadline (optional)">
+          <button class="go">Add goal</button>
+        </form>
+        <p class="error" id="goal-error" hidden></p>
+      </details>
     </section>
 
     <section class="card">
       <div class="card-head"><h2>The receipts</h2></div>
-      <p class="muted">Recent arguments, and how they went.</p>
       <div id="arguments"></div>
     </section>
   </div>
+
+  <section class="card" id="history" hidden>
+    <div class="card-head"><h2>Stare history</h2><span class="tag">Tiger Data</span></div>
+    <div class="minis">
+      <div class="mini"><b id="h-eye">–</b><span>eye contact</span></div>
+      <div class="mini"><b id="h-rows">–</b><span>gaze snapshots</span></div>
+      <div class="mini"><b id="h-hour">–</b><span id="h-hour-sub">riskiest hour</span></div>
+    </div>
+    <h3>Eye contact per argument</h3>
+    <div id="h-args"></div>
+    <h3>Last 30 days</h3>
+    <div class="days" id="h-days" role="img" aria-label="Money spent and saved per day"></div>
+    <div class="legend"><span><i style="background:var(--pink)"></i>Spent</span><span><i style="background:var(--mint)"></i>Saved</span><span id="h-store"></span></div>
+    <p class="error" id="h-error" hidden></p>
+  </section>
 
   <section class="card">
     <form id="budget-form" class="budget-form">
@@ -244,7 +290,7 @@ const ago = (stamp) => {
   const days = Math.floor((Date.now() - new Date(stamp)) / 86400000);
   return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
 };
-const STAMPS = {release: "Approved", timer: "Cool off", escalate: "Tattled"};
+const STAMPS = {release: "Approved", timer: "Cool off", escalate: "Over budget"};
 let state = null;
 
 async function api(path, method = "GET", body) {
@@ -281,7 +327,7 @@ function render(s) {
   $("meter").classList.toggle("low", pct < 15);
   $("saved").textContent = money(s.saved_by_letting_go);
   $("won").textContent = s.arguments_won;
-  $("won-of").textContent = `of ${s.arguments_total}. ${s.arguments_total && s.arguments_won / s.arguments_total > 0.5 ? "Okay, lawyer." : "I'm undefeated-ish."}`;
+  $("won-of").textContent = `of ${s.arguments_total}`;
   if (document.activeElement?.name !== "budget") $("budget-input").value = s.monthly_budget;
 
   const [tag, line, face] = mood(s);
@@ -293,31 +339,35 @@ function render(s) {
     const pct = Math.min(100, Math.round(100 * g.saved / g.target));
     return `<div class="goal">
       <div class="goal-head"><span class="item">${esc(g.name)}</span>
-        <span class="sub">${money(g.saved)} / ${money(g.target)}${g.deadline ? " · by " + esc(g.deadline) : ""}</span></div>
-      <div class="bar"><div style="width:${pct}%"></div><span>${pct}%</span></div>
-      <div class="actions">
-        <input type="number" step="1" placeholder="$" aria-label="Amount" style="width:90px" data-amount="${g.id}">
-        <button class="go" data-save="${g.id}">Add savings</button>
+        <span class="sub">${money(g.saved)} / ${money(g.target)}</span></div>
+      <div class="bar"><div style="width:${pct}%"></div><span>${pct}%</span></div></div>`;
+  }).join("") : `<p class="empty">No goals yet.</p>`;
+  // Editing controls stay tucked under "Manage"; don't redraw them while someone is typing in one.
+  if (!$("goal-actions").contains(document.activeElement)) {
+    $("goal-actions").innerHTML = s.goals.map((g) => `<div class="actions">
+        <span class="item" style="flex:1 1 120px">${esc(g.name)}</span>
+        <input type="number" step="1" placeholder="$" aria-label="Amount for ${esc(g.name)}" style="width:80px" data-amount="${g.id}">
+        <button class="go" data-save="${g.id}">Add</button>
         <button class="ghost" data-delete="${g.id}">Remove</button>
-      </div></div>`;
-  }).join("") : `<p class="empty">No goals yet. Give me something to protect.</p>`;
+      </div>`).join("");
+  }
 
-  const goalOptions = `<option value="">Just let it go</option>` +
-    s.goals.map((g) => `<option value="${g.id}">Put it toward ${esc(g.name)}</option>`).join("");
+  const goalOptions = `<option value="">No goal</option>` +
+    s.goals.map((g) => `<option value="${g.id}">→ ${esc(g.name)}</option>`).join("");
   $("waiting").innerHTML = s.waiting.length ? s.waiting.map((w) => `<div class="row">
       <span><span class="item">${esc(w.item)}</span><span class="price">${money(w.price)}</span><br>
-        <span class="sub">Tried ${w.tries} time${w.tries === 1 ? "" : "s"}${w.tries >= 3 ? " (seriously?)" : ""} · first wanted ${ago(w.first_wanted)}${w.status === "still_want" ? " · you still want it" : ""}</span></span>
+        <span class="sub">${ago(w.first_wanted)}${w.tries > 1 ? ` · tried ${w.tries}×` : ""}${w.status === "still_want" ? " · kept" : ""}</span></span>
       <span class="actions" style="margin:0">
         <select data-goal-for="${w.id}" aria-label="Where the money goes">${goalOptions}</select>
-        <button class="primary" data-letgo="${w.id}">Let it go</button>
-        <button data-still="${w.id}">Still want</button>
-      </span></div>`).join("") : `<p class="empty">Nothing waiting. I'm proud of you. For now.</p>`;
+        <button class="primary" data-letgo="${w.id}">Let go</button>
+        ${w.status === "still_want" ? "" : `<button data-still="${w.id}">Keep</button>`}
+      </span></div>`).join("") : `<p class="empty">Nothing waiting.</p>`;
 
-  $("arguments").innerHTML = s.arguments.length ? s.arguments.map((a) => `<div class="row">
-      <span><span class="item">${esc(a.item)}</span><span class="price">${money(a.price)}</span><br>
-        <span class="sub">${a.said.length ? `<q>${esc(a.said.reduce((x, y) => y.length > x.length ? y : x))}</q> · ` : ""}${ago(a.time)}</span></span>
-      <span class="stamp ${esc(a.verdict)}">${esc(STAMPS[a.verdict] || a.verdict)}${a.need && a.need !== "unclear" ? " · " + esc(a.need) : ""}</span>
-    </div>`).join("") : `<p class="empty">No arguments yet. Go try to buy something. I dare you.</p>`;
+  $("arguments").innerHTML = s.arguments.length ? s.arguments.slice(0, 5).map((a) => `<div class="row">
+      <span><span class="item">${esc(a.item)}</span><span class="price">${money(a.price)}</span>
+        ${a.said.length ? `<br><span class="sub"><q>${esc(a.said[a.said.length - 1])}</q></span>` : ""}</span>
+      <span class="stamp ${esc(a.verdict)}">${esc(STAMPS[a.verdict] || a.verdict)}</span>
+    </div>`).join("") : `<p class="empty">No arguments yet.</p>`;
 }
 
 async function refresh() {
@@ -329,6 +379,40 @@ async function refresh() {
     $("status").textContent = "Can't reach Piggyback";
     $("status").classList.add("off");
   }
+}
+
+const hour12 = (h) => `${h % 12 || 12} ${h < 12 ? "am" : "pm"}`;
+
+function renderHistory(t) {
+  $("history").hidden = !t.enabled;
+  if (!t.enabled) return;
+  $("h-error").hidden = !t.error;
+  if (t.error) { $("h-error").textContent = "Can't reach the history database right now."; return; }
+  $("h-eye").textContent = t.eye_contact == null ? "–" : Math.round(100 * t.eye_contact) + "%";
+  $("h-rows").textContent = t.gaze_rows.toLocaleString();
+  const risky = t.by_hour.filter((h) => h.checkouts >= 2).sort((a, b) => b.stopped / b.checkouts - a.stopped / a.checkouts)[0];
+  $("h-hour").textContent = risky ? hour12(risky.hour) : "–";
+  $("h-hour-sub").textContent = "riskiest hour";
+  $("h-args").innerHTML = t.arguments.length ? t.arguments.slice(0, 6).map((a) => {
+    const pct = a.eye_contact == null ? null : Math.round(100 * a.eye_contact);
+    return `<div class="eye"><span class="item" title="${esc(a.item)}">${esc(a.item)}</span>
+      <div class="bar">${pct == null ? `<span>typed</span>` : `<div style="width:${pct}%"></div><span>${pct}%</span>`}</div>
+      <span class="stamp ${esc(a.verdict)}">${esc(STAMPS[a.verdict] || a.verdict)}</span></div>`;
+  }).join("") : `<p class="empty">No arguments yet.</p>`;
+  const byDay = Object.fromEntries(t.days.map((d) => [d.day, d]));
+  const days = [...Array(30)].map((_, i) => {
+    const d = new Date(Date.now() - (29 - i) * 86400000);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return byDay[key] || {day: key, spent: 0, saved: 0};
+  });
+  const top = Math.max(1, ...days.map((d) => d.spent + d.saved));
+  $("h-days").innerHTML = days.map((d) => `<div title="${d.day}: spent ${money(d.spent)}, saved ${money(d.saved)}">
+      <span class="spent" style="height:${100 * d.spent / top}%"></span><span class="saved" style="height:${100 * d.saved / top}%"></span></div>`).join("");
+  $("h-store").textContent = t.compression != null ? `${Math.round(100 * t.compression)}% compressed` : "";
+}
+
+async function refreshHistory() {
+  try { renderHistory(await api("/trends")); } catch (e) { /* the main status already says if Piggyback is down */ }
 }
 
 async function act(path, method, body) {
@@ -379,7 +463,18 @@ document.addEventListener("pointermove", (e) => {
   pupils.forEach((p) => p.setAttribute("transform", `translate(${dx * 9} ${dy * 5})`));
 });
 
+// Judging table: one click puts the demo back for the next person.
+api("/health").then((h) => { $("next-visitor").hidden = !h.demo; }).catch(() => {});
+$("next-visitor").addEventListener("click", async (e) => {
+  e.target.disabled = true;
+  try { render(await api("/demo/reset", "POST")); refreshHistory(); }
+  catch (err) { alert(err.message); }
+  e.target.disabled = false;
+});
+
 refresh();
+refreshHistory();
+setInterval(refreshHistory, 10000);
 // Live during the demo: the waiting room fills in as Piggyback gives verdicts.
 setInterval(() => { if (!document.activeElement?.matches("input, select")) refresh(); }, 4000);
 </script>

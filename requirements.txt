@@ -7,6 +7,9 @@ google-genai
 anthropic
 websockets
 
+# History in Tiger Data (tiger.py; optional, needs TIGER_DB_URL)
+psycopg[binary]
+
 # Spoken answers (faster-whisper on the mic)
 faster-whisper
 sounddevice

@@ -8,3 +8,4 @@ decisions.jsonl
 models/
 .env
 firmware/**/secrets.h
+*.backup-*
