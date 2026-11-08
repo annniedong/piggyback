@@ -89,7 +89,7 @@ def check_mic():
 
 
 def check_speaker():
-    """Which output Piggyback's voice goes to (SPEAKER, default "jbl"), and a test line on it."""
+    """Which output Piggyback's voice goes to (SPEAKER, default "macbook"), and a test line on it."""
     import subprocess
 
     outputs = brain.audio_outputs()

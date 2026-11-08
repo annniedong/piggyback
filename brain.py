@@ -51,7 +51,7 @@ END_PAUSE = float(os.getenv("END_PAUSE", "0.8"))  # seconds of quiet that end a 
 TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
 LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
-SPEAKER = os.getenv("SPEAKER", "jbl")  # Piggyback's voice: the first audio output whose name contains this
+SPEAKER = os.getenv("SPEAKER", "macbook")  # Piggyback's voice: the first audio output whose name contains this
 MIC_DEVICE = os.getenv("MIC_DEVICE", "macbook")  # the laptop's own mic; picked by name so iPhone/AirPods mics can't take over
 MAX_LISTEN_SECONDS = float(os.getenv("MAX_LISTEN_SECONDS", "8"))
 NO_SPEECH_SECONDS = float(os.getenv("NO_SPEECH_SECONDS", "6"))
