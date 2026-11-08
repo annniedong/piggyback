@@ -144,6 +144,12 @@
       .filter(Boolean).join(" ").trim().replace(/\s+/g, " ");
     if (!label || label.length > 80 || !ADD_TO_BAG.test(label) || Date.now() - lastAdded < 3000) return;
     lastAdded = Date.now();
+    if (cleared[site]) {
+      // Something new in the bag is a new purchase: hold this site's checkout again.
+      const { [site]: _, ...rest } = cleared;
+      cleared = rest;
+      try { chrome.storage.local.set({ clearedSites: cleared }); } catch {}
+    }
     const d = btn.dataset;
     const price = parseFloat(d.price);
     try {
