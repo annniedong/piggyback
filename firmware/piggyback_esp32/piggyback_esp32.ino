@@ -35,6 +35,11 @@ const uint8_t BUDGET_ADDR = 0x3D;
 struct Limits { int panMin, panMax, tiltMin, tiltMax; };
 const Limits LIMITS = {0, 180, 60, 120};  // narrow panMin/panMax if the head hits the frame
 const int HOME_PAN = 90, HOME_TILT = 90;
+// Trim: degrees added to every servo write so "home" really faces straight ahead, fixing a horn that
+// sits a few degrees off (its teeth only let you reposition it in big jumps). Tune live in Serial
+// Monitor with "trim pan 3" / "trim tilt -2", then paste the printed values here.
+const int PAN_TRIM = 0, TILT_TRIM = 0;
+int panTrim = PAN_TRIM, tiltTrim = TILT_TRIM;
 
 // The servo's top speed. Every move is slowed down so it never asks for more than this,
 // so a fast gesture just plays a bit slower instead of the servo lagging behind.
@@ -157,6 +162,7 @@ int seqI = 0;
 bool seqActive = false;
 bool seqQuiet = false;  // idle's repeat passes aren't printed, so the monitor doesn't scroll forever
 int seqDir = 1;     // -1 mirrors pan offsets so turns go toward the middle, not into a limit
+unsigned long bootIdleAt = 0;  // when the boot pause ends and idle drift starts
 int curPreset = 0;  // last expression, so idle drift can restart when tracking stops
 
 // A "look" that arrives during a one-shot motion waits until the motion finishes.
@@ -216,14 +222,18 @@ void playMotion(const Motion& m) {
   startStep();
 }
 
+void writeServos() {
+  panServo.write(constrain((int)curPan + panTrim, 0, 180));
+  tiltServo.write(constrain((int)curTilt + tiltTrim, 0, 180));
+}
+
 void stepMotion() {
   float t = moveMs ? (float)(millis() - moveStart) / moveMs : 1.0;
   if (t > 1) t = 1;
   float s = t * t * (3 - 2 * t);
   curPan = fromPan + (toPan - fromPan) * s;
   curTilt = fromTilt + (toTilt - fromTilt) * s;
-  panServo.write((int)curPan);
-  tiltServo.write((int)curTilt);
+  writeServos();
 
   if (t < 1 || !seqActive) return;
   if (stepMode) {  // hold here until Enter
@@ -520,6 +530,13 @@ void stepDemo() {
 void printHelp() {
   Serial.println("{\"help\":\"type a move: idle alert suspicious skeptical satisfied disappointed thinking shake nod lookback center\"}");
   Serial.println("{\"help\":\"demo = all moves in turn | step <move> = one step per Enter | slow / normal = 1/3 speed or back | stop = hold still | budget 150 = test the budget screen\"}");
+  Serial.println("{\"help\":\"home = face straight ahead and hold | trim pan 3 / trim tilt -2 = fix a crooked head\"}");
+}
+
+void printTrim() {
+  char out[128];
+  snprintf(out, sizeof(out), "{\"trim\":\"paste into the code: const int PAN_TRIM = %d, TILT_TRIM = %d;\"}", panTrim, tiltTrim);
+  Serial.println(out);
 }
 
 bool isMove(const char* name) {
@@ -534,7 +551,7 @@ void playByName(const char* name) {
 }
 
 // Plain words typed in Serial Monitor: "skeptical", "shake", "demo", "help", "slow", "step skeptical".
-void handleWord(const char* word, const char* arg) {
+void handleWord(const char* word, const char* arg, const char* arg2 = "") {
   if (strcmp(word, "step") == 0) {
     if (!isMove(arg)) {
       reply("{\"err\":\"type step and a move, e.g. step skeptical\"}");
@@ -552,6 +569,28 @@ void handleWord(const char* word, const char* arg) {
     curPreset = -1;  // no idle drift until the next move
     moveTo(userPan, userTilt, 500);
     Serial.println("{\"note\":\"holding still, facing forward. Type a move to start again\"}");
+  } else if (strcmp(word, "home") == 0) {
+    seqActive = false;
+    curPreset = -1;  // no idle drift until the next move
+    userPan = HOME_PAN;
+    userTilt = HOME_TILT;
+    moveTo(HOME_PAN, HOME_TILT, 600);
+    Serial.println("{\"note\":\"home: facing straight ahead and holding. Crooked? try trim pan 3 or trim tilt -2\"}");
+  } else if (strcmp(word, "trim") == 0) {
+    // "trim pan 3": the head shifts right away (stepMotion rewrites the servos every loop).
+    if ((strcmp(arg, "pan") != 0 && strcmp(arg, "tilt") != 0) || !arg2[0]) {
+      reply("{\"err\":\"type trim pan <degrees> or trim tilt <degrees>, e.g. trim pan 3\"}");
+      printTrim();
+      return;
+    }
+    int deg = constrain(atoi(arg2), -30, 30);
+    if (strcmp(arg, "pan") == 0) panTrim = deg; else tiltTrim = deg;
+    seqActive = false;
+    curPreset = -1;
+    userPan = HOME_PAN;
+    userTilt = HOME_TILT;
+    moveTo(HOME_PAN, HOME_TILT, 300);
+    printTrim();
   } else if (strcmp(word, "slow") == 0) {
     slowFactor = 3;
     Serial.println("{\"note\":\"slow motion on: every move takes 3x longer (type normal to undo)\"}");
@@ -582,20 +621,25 @@ void handleWord(const char* word, const char* arg) {
 }
 
 void handleLine(const char* line) {
+  if (strstr(line, "budget") == nullptr) bootIdleAt = 0;  // a real command: skip the boot drift
   while (*line == ' ') line++;
   if (*line != '{') {  // not JSON: a word typed by a person
-    char word[32], arg[32];
-    size_t n = 0, m = 0;
+    char word[32], arg[32], arg2[32];
+    size_t n = 0, m = 0, k = 0;
     for (; line[n] && line[n] != ' ' && n < sizeof(word) - 1; n++) word[n] = tolower(line[n]);
     word[n] = '\0';
     while (line[n] == ' ') n++;
     for (; line[n + m] && line[n + m] != ' ' && m < sizeof(arg) - 1; m++) arg[m] = tolower(line[n + m]);
     arg[m] = '\0';
+    n += m;
+    while (line[n] == ' ') n++;
+    for (; line[n + k] && line[n + k] != ' ' && k < sizeof(arg2) - 1; k++) arg2[k] = tolower(line[n + k]);
+    arg2[k] = '\0';
     bool keepsDemo = strcmp(word, "demo") == 0 || strcmp(word, "slow") == 0 || strcmp(word, "normal") == 0;
     bool keepsStep = strcmp(word, "step") == 0 || strcmp(word, "next") == 0 || strcmp(word, "n") == 0 || keepsDemo;
     if (!keepsDemo) demoI = -1;
     if (!keepsStep) stepMode = stepWaiting = false;
-    handleWord(word, arg);
+    handleWord(word, arg, arg2);
     return;
   }
   // Any JSON command (from the brain) stops a demo or step mode, except tracking and the budget screen.
@@ -685,17 +729,24 @@ void setup() {
   tiltServo.setPeriodHertz(50);
   panServo.attach(PAN_PIN, 500, 2400);
   tiltServo.attach(TILT_PIN, 500, 2400);
-  panServo.write(HOME_PAN);
-  tiltServo.write(HOME_TILT);
+  writeServos();  // home, with trim
 
   showEyes(EYES_IDLE);
   reply("{\"ready\":true}");
   printHelp();
-  playMotion(PRESETS[0].motion);  // idle drift
+  printTrim();
+  // Hold still at home for 2 s before drifting, so every start looks the same.
+  curPreset = -1;
+  bootIdleAt = millis() + 2000;
 }
 
 void loop() {
   readSerial();
+  if (bootIdleAt && millis() >= bootIdleAt) {
+    bootIdleAt = 0;
+    curPreset = 0;
+    playMotion(PRESETS[0].motion);  // idle drift
+  }
   // Idle and nobody being tracked for 5 s: go back to drifting.
   if (!seqActive && curPreset == 0 && millis() - lastLookMs > 5000) {
     Serial.println("{\"note\":\"no face for 5 s, drifting again\"}");
