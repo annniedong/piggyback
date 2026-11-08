@@ -30,6 +30,10 @@
     IDLE <on|off>        idle pupil glances after a few quiet seconds
     MOVE <expr>          play a brain expression's head turns (idle alert suspicious ...), eyes unchanged
     PAN <deg>            face this servo angle (PAN_MIN..PAN_MAX); expressions turn around it
+    HOME                 face straight ahead (PAN_HOME) and hold still
+    TRIM [deg]           calibrate "straight ahead": shift every head position by deg (-30..30),
+                         saved in the ESP32's flash so it lasts through reboots and uploads.
+                         TRIM alone prints the saved value; TRIM 0 clears it.
     STATUS               print current state
     HELP                 list commands
   Every reply starts with OK, ERR, PONG, or READY.
@@ -58,6 +62,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ESP32Servo.h>
+#include <Preferences.h>
 
 // ======================= CONFIG =======================
 
@@ -101,9 +106,10 @@
 
 // Head: one pan servo (left and right only). Calibrate the limits once the head is mounted.
 #define PAN_PIN    18
-#define PAN_MIN    45     // servo degrees; narrow these if the head hits the frame
-#define PAN_MAX    135
-#define PAN_HOME   90     // straight ahead; "look" [0, 0]
+#define PAN_HOME   20     // START POSITION: the servo angle where the head faces straight ahead
+                          // (found by hand with PAN). Head not facing front at startup? Change this and upload.
+#define PAN_MIN    (PAN_HOME - 45 < 0 ? 0 : PAN_HOME - 45)        // turn limits: 45 degrees each way from
+#define PAN_MAX    (PAN_HOME + 45 > 180 ? 180 : PAN_HOME + 45)    // PAN_HOME; narrow if the head hits the frame
 #define TILT_PIN   -1     // set to 19 to hold a mounted tilt servo still at TILT_HOME; -1 = not driven
 #define TILT_HOME  90
 #define MAX_DEG_PER_SEC 100.0f  // servo top speed with the head on; faster turns just take longer
@@ -217,6 +223,8 @@ bool     lookPending = false;        // a "look" during a one-shot move or a hol
 int      pendingPan = PAN_HOME;
 uint32_t pendingMs = 0;
 bool     holding = false;            // the brain is recording an answer: no head motion
+int      panTrim = 0;                // degrees added to every servo write (TRIM, saved in flash)
+Preferences prefs;
 
 // Command input buffers (one per source) and where replies go
 #define LINE_MAX 96
@@ -406,10 +414,17 @@ void updateIdle(uint32_t now) {
 
 // ======================= HEAD =======================
 
+// Every pan servo write goes through here, so the trim moves the whole range, home included.
+void writePan(int deg) {
+  panServo.write(constrain(deg + panTrim, 0, 180));
+  panWritten = deg;
+}
+
 // Starts a smoothstep turn from wherever the head is now, so a new command interrupts cleanly.
-void turnTo(int pan, uint32_t ms) {
+// anyAngle: skip PAN_MIN/PAN_MAX (only the typed PAN command, for finding PAN_HOME by hand).
+void turnTo(int pan, uint32_t ms, bool anyAngle = false) {
   panFrom = panCur;
-  panTo = clampf(pan, PAN_MIN, PAN_MAX);
+  panTo = anyAngle ? clampf(pan, 0, 180) : clampf(pan, PAN_MIN, PAN_MAX);
   // Smoothstep peaks at 1.5x the average speed, so stretch the turn until that peak fits the servo.
   uint32_t minMs = (uint32_t)(1.5f * fabsf(panTo - panFrom) / MAX_DEG_PER_SEC * 1000);
   panMs = ms > minMs ? ms : minMs;
@@ -472,7 +487,7 @@ void updateHead(uint32_t now) {
   float s = t * t * (3 - 2 * t);
   panCur = panFrom + (panTo - panFrom) * s;
   int deg = (int)lroundf(panCur);
-  if (deg != panWritten) { panServo.write(deg); panWritten = deg; }
+  if (deg != panWritten) writePan(deg);
 
   if (t < 1 || !curMove) return;
   if (++moveI < curMove->n) { startStep(0); return; }
@@ -499,7 +514,7 @@ int findExpr(const char* name) {
 
 void printHelp() {
   out->println("OK commands: PING | GAZE <x> <y> | EYES <expr> [ms] | BLINK | CENTER |");
-  out->println("OK   IDLE <on|off> | MOVE <expr> | PAN <deg> | STATUS | HELP");
+  out->println("OK   IDLE <on|off> | MOVE <expr> | PAN <deg> | HOME | TRIM [deg] | STATUS | HELP");
   out->print("OK expressions:");
   for (int i = 0; i < NUM_EXPRS; i++) { out->print(' '); out->print(EXPRS[i].name); }
   out->println();
@@ -556,19 +571,42 @@ void handleCommand(char* line) {
     out->printf("OK MOVE %s\n", BRAIN_EXPRS[b].name);
 
   } else if (!strcasecmp(cmd, "PAN")) {
-    if (!a1) { out->printf("ERR usage: PAN <deg> (%d..%d)\n", PAN_MIN, PAN_MAX); return; }
+    if (!a1) { out->println("ERR usage: PAN <deg> (0..180)"); return; }
     holding = false;
     lookPending = false;
     curMove = NULL;
-    facePan = (int)clampf(atof(a1), PAN_MIN, PAN_MAX);
-    turnTo(facePan, 500);
+    facePan = (int)clampf(atof(a1), 0, 180);   // full range, for finding PAN_HOME by hand
+    turnTo(facePan, 500, true);
     out->printf("OK PAN %d\n", facePan);
+
+  } else if (!strcasecmp(cmd, "HOME")) {
+    holding = false;
+    lookPending = false;
+    curMove = NULL;
+    facePan = PAN_HOME;
+    turnTo(facePan, 500);
+    out->printf("OK HOME facing straight ahead (servo %d = %d + trim %d). Not straight? TRIM <deg>\n",
+                constrain(PAN_HOME + panTrim, 0, 180), PAN_HOME, panTrim);
+
+  } else if (!strcasecmp(cmd, "TRIM")) {
+    if (a1) {
+      panTrim = constrain(atoi(a1), -30, 30);
+      prefs.putInt("panTrim", panTrim);
+      // Face home with the new trim right away, so you can see the change.
+      holding = false;
+      lookPending = false;
+      curMove = NULL;
+      facePan = PAN_HOME;
+      turnTo(facePan, 300);
+      writePan((int)lroundf(panCur));
+    }
+    out->printf("OK TRIM %d (saved; + turns the head toward servo 180, - toward 0)\n", panTrim);
 
   } else if (!strcasecmp(cmd, "STATUS")) {
     out->printf("OK STATUS eyes=%s gaze=%.2f,%.2f staring=%d idle=%d oled=%d\n",
                 EXPRS[exprIdx].name, gazeTX, gazeTY, staring, idleOn, oledOk);
-    out->printf("OK HEAD pan=%d facing=%d moving=%d holding=%d\n",
-                panWritten, facePan, curMove != NULL, holding);
+    out->printf("OK HEAD pan=%d facing=%d moving=%d holding=%d trim=%d\n",
+                panWritten, facePan, curMove != NULL, holding, panTrim);
     out->printf("OK WIFI %s ip=%s client=%d\n",
                 WiFi.status() == WL_CONNECTED ? "connected" : (wifiEnabled ? "connecting" : "off"),
                 WiFi.localIP().toString().c_str(), (int)(client && client.connected()));
@@ -765,10 +803,12 @@ void setup() {
   // periphBegin = false: the bus is already started on the right pins
   oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false);
 
+  // Start facing straight ahead, with the saved trim, so the head starts in the same place every time.
+  prefs.begin("pig", false);
+  panTrim = constrain(prefs.getInt("panTrim", 0), -30, 30);
   panServo.setPeriodHertz(50);
   panServo.attach(PAN_PIN, 500, 2400);
-  panServo.write(PAN_HOME);
-  panWritten = PAN_HOME;
+  writePan(PAN_HOME);
   if (TILT_PIN >= 0) {
     tiltServo.setPeriodHertz(50);
     tiltServo.attach(TILT_PIN, 500, 2400);
@@ -789,8 +829,8 @@ void setup() {
   }
 
   Serial.println("{\"ready\":true}");   // brain.py waits for this line after opening the port
-  Serial.printf("READY oled=%d wifi=%s\n", oledOk,
-                wifiEnabled ? "connecting to " WIFI_SSID : "off");
+  Serial.printf("READY oled=%d wifi=%s pan_trim=%d\n", oledOk,
+                wifiEnabled ? "connecting to " WIFI_SSID : "off", panTrim);
   if (!oledOk) Serial.println("ERR OLED not found at 0x3C (SDA 21, SCL 22)");
 }
 
