@@ -132,13 +132,17 @@
 
   // Add to bag: the item goes in right away; Piggyback just says one quick line (the argument waits
   // for checkout). background.js posts it to the brain's /added.
-  const ADD_TO_BAG = /^(\+\s*)?(add to (cart|bag|basket|trolley)|add to shopping (cart|bag))\b/i;
+  // Matched anywhere in the label ("Quick add · Add to Bag · $59"), but not "Added to bag" confirmations.
+  const ADD_TO_BAG = /\badd (it )?to (shopping )?(cart|bag|basket|trolley)\b/i;
+  const BUTTONS = "button, input[type=submit], input[type=button], a, [role=button]";
   let lastAdded = 0;
   window.addEventListener("click", (e) => {
     if (!isDemoStore && !holdEverywhere) return;
-    const btn = e.target instanceof Element && e.target.closest("button, input[type=submit], input[type=button], a, [role=button]");
-    const label = btn && (btn.innerText || btn.value || btn.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
-    if (!label || label.length > 40 || !ADD_TO_BAG.test(label) || Date.now() - lastAdded < 3000) return;
+    // composedPath() reaches into web components (shadow DOM), where e.target is only the outer element.
+    const btn = e.composedPath().find((el) => el instanceof Element && el.matches(BUTTONS));
+    const label = btn && [btn.innerText, btn.value, btn.getAttribute("aria-label"), btn.title]
+      .filter(Boolean).join(" ").trim().replace(/\s+/g, " ");
+    if (!label || label.length > 80 || !ADD_TO_BAG.test(label) || Date.now() - lastAdded < 3000) return;
     lastAdded = Date.now();
     const d = btn.dataset;
     const price = parseFloat(d.price);
