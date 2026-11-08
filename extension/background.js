@@ -1,41 +1,18 @@
-// Piggyback background: watches shopping in your normal Chrome and says Piggyback's reaction
-// out loud with Chrome's built-in voice (chrome.tts), so it works even when brain.py is off.
+// Piggyback background: watches shopping in your normal Chrome, silently. What it notices goes to
+// brain.py as context, and Piggyback brings it up out loud at checkout ("An ad brought you here").
 //
-//   alert         more than 6 shopping visits today
-//   suspicious    arrived at a shopping site from an ad (gclid / fbclid / msclkid)
-//   skeptical     more than 5 items in the cart
-//   satisfied     cart total within the weekly budget
-//   disappointed  cart total over the weekly budget
+//   ad_referral     arrived at a shopping site from an ad (gclid / fbclid / msclkid)
+//   shopping_visit  shopping pages visited today (value = count)
+//   cart            items and total in the cart (count, value = total)
+//   sales           sale.js sends offer text to the brain's AI (/sale), which remembers what it found
 //
 // Works on any shopping site: shop.js decides whether a page is a shop and reports visits;
-// cart.js reads the cart on cart/bag pages; sale.js sends offer text to the brain's AI (/sale).
-// Visits are also posted to brain.py's /alert as `shopping_visit` (logged there, silent).
-// The other reactions are NOT sent to the brain yet, because the brain would speak them too.
+// cart.js reads the cart on cart/bag pages. Nothing here speaks.
 
 const ALERT_URL = "http://localhost:8000/alert";
 const AD_PARAMS = ["gclid", "fbclid", "msclkid"];
-const VISIT_LIMIT = 6;       // react when today's visits go above this
-const CART_ITEM_LIMIT = 5;   // react when the cart has more items than this
-const DEFAULT_WEEKLY_BUDGET = 150;
-
-const LINES = {
-  alert: "Alert. That's more than six shopping visits today.",
-  suspicious: "Suspicious. An ad brought you here.",
-  skeptical: "Skeptical. More than five items in your cart? Really?",
-  satisfied: "Satisfied. Your cart is within your weekly budget. Nice.",
-  disappointed: "Disappointed. Your cart is over your weekly budget. Put it back.",
-};
 
 const lastUrl = new Map();     // tabId -> last URL we counted
-const cartRules = new Map();   // tabId -> Set of cart reactions already said (until the rule turns off)
-
-// ------------------------------------------------------------------ speech
-
-function react(expression, detail = "") {
-  const line = LINES[expression];
-  console.log("Piggyback:", expression, detail);
-  chrome.tts.speak(line, { enqueue: true, rate: 1.0 });
-}
 
 // ------------------------------------------------------------------ helpers
 
@@ -52,15 +29,15 @@ function today() {
   return new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local time
 }
 
-async function postToBrain(type, website, value = null) {
+async function postToBrain(type, website, value = null, count = null) {
   try {
     await fetch(ALERT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, website, value }),
+      body: JSON.stringify({ type, website, value, count }),
     });
   } catch {
-    // Brain is off; speech still works.
+    // Brain is off; nothing to tell.
   }
 }
 
@@ -68,16 +45,12 @@ async function postToBrain(type, website, value = null) {
 
 async function onVisit(url, cameFromAd) {
   const day = today();
-  const stored = await chrome.storage.local.get(["visitDay", "visitCount", "alertedDay"]);
+  const stored = await chrome.storage.local.get(["visitDay", "visitCount"]);
   const count = (stored.visitDay === day ? stored.visitCount || 0 : 0) + 1;
   await chrome.storage.local.set({ visitDay: day, visitCount: count });
 
   postToBrain("shopping_visit", url, count);
-  if (cameFromAd || isAdReferral(url)) react("suspicious", url);
-  if (count > VISIT_LIMIT && stored.alertedDay !== day) {
-    await chrome.storage.local.set({ alertedDay: day }); // once per day
-    react("alert", `${count} visits today`);
-  }
+  if (cameFromAd || isAdReferral(url)) postToBrain("ad_referral", url);
 }
 
 // shop.js sends this once per URL when it decides the page is a shopping page.
@@ -87,10 +60,7 @@ function onShopPage(tabId, url, cameFromAd) {
   onVisit(url, cameFromAd);
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  lastUrl.delete(tabId);
-  cartRules.delete(tabId);
-});
+chrome.tabs.onRemoved.addListener((tabId) => lastUrl.delete(tabId));
 
 // ------------------------------------------------------------------ cart
 
@@ -113,37 +83,18 @@ async function onCartText(tabId, msg) {
   } catch (e) {
     console.warn("Piggyback cart AI unavailable, using guess:", e.message);
   }
-  onCart(tabId, { ...reading, source: `${msg.source} ${msg.where}` });
+  onCart(tabId, { ...reading, url: msg.url, source: `${msg.source} ${msg.where}` });
 }
 
-async function onCart(tabId, { total, count, source, method = "exact" }) {
-  const { weeklyBudget = DEFAULT_WEEKLY_BUDGET } = await chrome.storage.local.get("weeklyBudget");
+async function onCart(tabId, { url, total, count, source, method = "exact" }) {
   await chrome.storage.local.set({ lastCart: { total, count, source, method, at: Date.now() } });
-  // count or total can be null when a real store's page didn't show it; skip those rules.
-  const hasItems = count == null ? total > 0 : count > 0;
-  const rules = {
-    skeptical: count != null && count > CART_ITEM_LIMIT,
-    disappointed: total != null && hasItems && total > weeklyBudget,
-    satisfied: total != null && hasItems && total <= weeklyBudget,
-  };
-  const said = cartRules.get(tabId) || new Set();
-  cartRules.set(tabId, said);
-  // Say each reaction once when its rule turns on; it can fire again after the rule turns off.
-  for (const [expression, on] of Object.entries(rules)) {
-    if (on && !said.has(expression)) {
-      said.add(expression);
-      react(expression, `cart ${count} items, $${total}, budget $${weeklyBudget}`);
-    } else if (!on) {
-      said.delete(expression);
-    }
-  }
+  // count or total can be null when a real store's page didn't show it; the brain skips those.
+  if (url) postToBrain("cart", url, total ?? null, count ?? null);
 }
 
 // ------------------------------------------------------------------ sales (AI, via brain.py /sale)
 
 const SALE_URL = "http://localhost:8000/sale";
-const SALE_REWARN_MS = 10 * 60 * 1000; // speak about sales on the same site at most every 10 min
-const saleSpokenAt = new Map();        // hostname -> time
 
 async function onSalePage(page) {
   let result;
@@ -161,13 +112,9 @@ async function onSalePage(page) {
   }
   if (!result.on_sale) return;
 
+  // The brain remembers the sale for this site's checkout; this copy is just for the popup.
   const host = new URL(page.url).hostname.replace(/^www\./, "");
   await chrome.storage.local.set({ lastSale: { ...result, site: host, at: Date.now() } });
-  const now = Date.now();
-  if (now - (saleSpokenAt.get(host) || 0) < SALE_REWARN_MS) return;
-  saleSpokenAt.set(host, now);
-  console.log("Piggyback: sale", result);
-  chrome.tts.speak(`Suspicious. ${result.line}`, { enqueue: true });
 }
 
 // ------------------------------------------------------------------ messages
@@ -180,11 +127,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     else onCart(sender.tab.id, msg);
   } else if (msg.kind === "sale" && msg.page) {
     onSalePage(msg.page);
-  } else if (msg.kind === "test" && LINES[msg.expression]) {
-    chrome.tts.stop();
-    react(msg.expression, "(test)");
   } else if (msg.kind === "resetVisits") {
-    chrome.storage.local.set({ visitCount: 0, alertedDay: null });
+    chrome.storage.local.set({ visitCount: 0 });
   }
   sendResponse({ ok: true });
 });

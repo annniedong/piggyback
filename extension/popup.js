@@ -48,13 +48,6 @@ $("review").addEventListener("click", async () => {
 chrome.storage.local.get({ holdEverywhere: true }, ({ holdEverywhere }) => { $("holdEverywhere").checked = holdEverywhere; });
 $("holdEverywhere").addEventListener("change", () => chrome.storage.local.set({ holdEverywhere: $("holdEverywhere").checked }));
 
-// Weekly budget used by the cart reactions (satisfied / disappointed).
-chrome.storage.local.get({ weeklyBudget: 150 }, ({ weeklyBudget }) => { $("budget").value = weeklyBudget; });
-$("budget").addEventListener("change", () => {
-  const v = Math.max(0, Number($("budget").value) || 0);
-  chrome.storage.local.set({ weeklyBudget: v }, () => { $("saved").textContent = "saved"; });
-});
-
 // Last cart cart.js read, so you can check it matches what the store shows.
 chrome.storage.local.get("lastCart", ({ lastCart: c }) => {
   if (!c) return;
@@ -73,9 +66,6 @@ chrome.storage.local.get("lastSale", ({ lastSale: s }) => {
     `${s.urgency ? " (time pressure!)" : ""} (${mins ? mins + " min ago" : "just now"})`;
 });
 
-for (const b of document.querySelectorAll("button.test[data-expr]")) {
-  b.addEventListener("click", () => chrome.runtime.sendMessage({ kind: "test", expression: b.dataset.expr }));
-}
 $("reset").addEventListener("click", () => {
   chrome.runtime.sendMessage({ kind: "resetVisits" });
   $("reset").textContent = "Visits reset";

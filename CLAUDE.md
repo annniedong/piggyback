@@ -49,12 +49,12 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 Extension → brain (WebSocket `ws://localhost:8000/ws`):
 
 ```json
-{"type": "checkout", "item": "Smart toaster", "price": 400, "category": "kitchen"}
+{"type": "checkout", "item": "Smart toaster", "price": 400, "category": "kitchen", "url": "https://..."}
 {"type": "decision", "item": "Smart toaster", "outcome": "completed" | "abandoned", "seconds_on_page": 42}
 {"type": "answer", "text": "I need it for work"}
 ```
 
-- `checkout`: sent when the user clicks Place order (or similar). `price` is a number in dollars.
+- `checkout`: sent when the user clicks Place order (or similar). `price` is a number in dollars. `url` (optional) is the checkout page, used to match what the extension noticed on that site.
 - `decision`: `completed` when the user goes ahead with the order, `abandoned` when they put it back.
 - `answer`: optional. Spoken answers are heard by the brain itself; typed answers are for testing or if the mic fails.
 
@@ -71,11 +71,11 @@ Brain → extension (the overlay shows `question` and `verdict`; it doesn't show
 Browser bot → brain (HTTP `POST http://localhost:8000/alert`, returns `{"ok": true}`):
 
 ```json
-{"type": "shopping_visit" | "ad_referral" | "over_budget" | "cart_count" | "shopping_visits",
- "website": "https://www.amazon.com/...", "value": 182.5}
+{"type": "shopping_visit" | "ad_referral" | "cart" | "over_budget" | "cart_count" | "shopping_visits",
+ "website": "https://www.amazon.com/...", "value": 182.5, "count": 7}
 ```
 
-`shopping_visit` is only logged; the others set `suspicious` and speak a warning. Alerts never block, ask questions, or touch the profile. `over_budget` uses the bot's `--weekly-budget` flag, not the profile's budget.
+Signals are silent: nothing is spoken and the head doesn't move. `sales.py` keeps them per site for 30 minutes (`ad_referral`; `cart` with `count` and `value` = total; `shopping_visit` with `value` = pages today), along with any sale `/sale` found. When a checkout arrives with a `url` on that site, the AI prompt gets a "what you noticed on the page" section, and Piggyback brings it up ("An ad brought you here and the countdown is rushing you"). These are reasons to question, not to refuse; a real need still wins.
 
 Budget review (HTTP, extension button → `GET http://localhost:8000/review`, add `?speak_it=true` to have Piggyback say the summary out loud):
 

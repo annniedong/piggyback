@@ -17,8 +17,11 @@ import asyncio
 import json
 import os
 import re
+import time
+from datetime import date
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -184,7 +187,10 @@ def clean(data: dict) -> dict:
 async def check_sale(req: SaleCheck):
     key = req.url + "|" + str(hash((req.text[:3000], tuple(req.keyword_lines), tuple(req.struck_prices))))
     if key in _cache:
-        return _cache[key]
+        result = _cache[key]
+        if result["on_sale"]:
+            note(req.url, sale=result["discount"] or result["kind"], urgency=result["urgency"])
+        return result
 
     error = None
     local = keyword_check(req)
@@ -206,6 +212,8 @@ async def check_sale(req: SaleCheck):
 
     result = {**result, "error": error}
     print("Sale check:", req.url[:80], "->", result, flush=True)
+    if result["on_sale"]:
+        note(req.url, sale=result["discount"] or result["kind"], urgency=result["urgency"])
     _cache[key] = result
     return result
 
@@ -355,3 +363,61 @@ async def read_cart(req: CartCheck):
     print("Cart read:", req.url[:80], "->", result, flush=True)
     _cart_cache[key] = result
     return result
+
+
+# ---------------------------------------------------------------- what Piggyback saw (checkout context)
+#
+# The extension stays silent. What it notices on a site (came from an ad, a sale or countdown, the cart,
+# how much shopping today) is kept here for a while, and brain.py adds it to the AI prompt when that
+# site's checkout starts, so Piggyback can argue with it.
+
+SEEN_FOR_S = 30 * 60  # forget a site's signals after 30 minutes
+_seen: dict[str, dict] = {}  # site -> {"ad", "sale", "urgency", "cart_count", "cart_total", "at"}
+_visits = {"day": "", "count": 0}
+
+
+def site_of(url: str | None) -> str:
+    try:
+        return (urlparse(url or "").hostname or "").removeprefix("www.")
+    except ValueError:
+        return ""
+
+
+def note(url: str, **facts):
+    site = site_of(url)
+    if site:
+        _seen.setdefault(site, {}).update(facts, at=time.time())
+
+
+def note_alert(kind: str, url: str, value: float | None = None, count: int | None = None):
+    """Signals from the extension (and bot/) via POST /alert. Nothing is spoken."""
+    if kind == "ad_referral":
+        note(url, ad=True)
+    elif kind in ("shopping_visit", "shopping_visits") and value is not None:
+        _visits.update(day=str(date.today()), count=int(value))
+    elif kind == "cart":
+        note(url, cart_count=count, cart_total=value)
+    elif kind == "cart_count":
+        note(url, cart_count=int(value) if value is not None else None)
+    elif kind == "over_budget":
+        note(url, cart_total=value)
+
+
+def seen_on(url: str | None) -> str:
+    """Plain sentences for the AI about what was noticed on this checkout's site."""
+    lines = []
+    s = _seen.get(site_of(url))
+    if s and time.time() - s["at"] < SEEN_FOR_S:
+        if s.get("ad"):
+            lines.append("They arrived on this site by clicking an ad.")
+        if s.get("sale"):
+            lines.append(f"The site is pushing an offer: {s['sale']}"
+                         + (", with time pressure (ends soon, countdown, or low stock)." if s.get("urgency") else "."))
+        count, total = s.get("cart_count"), s.get("cart_total")
+        if count is not None or total is not None:
+            parts = [f"{count} item{'s' if count != 1 else ''}" if count is not None else None,
+                     f"${total:,.2f} total" if total is not None else None]
+            lines.append("Their cart on this site: " + ", ".join(x for x in parts if x) + ".")
+    if _visits["day"] == str(date.today()) and _visits["count"] > 1:
+        lines.append(f"They've visited {_visits['count']} shopping pages today.")
+    return "\n".join(lines)

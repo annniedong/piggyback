@@ -85,7 +85,8 @@
       const marked = document.querySelector('[data-piggyback="order-total"]');
       price = money(textOf(btn)) ?? (marked && money(textOf(marked))) ?? pageTotal() ?? productPrice() ?? 0;
     }
-    return { item: d.item || itemName(), price, category: d.category || "other" };
+    // url lets the brain match what the extension noticed on this site (ad, sale, cart).
+    return { item: d.item || itemName(), price, category: d.category || "other", url: location.href };
   }
 
   // Capture phase on window runs before any handler the page attached to the button.

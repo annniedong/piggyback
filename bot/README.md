@@ -26,7 +26,7 @@ The browser posts `{type, website, value}` to `/alert` for:
 - `cart_count`: a visible cart item count greater than five.
 - `shopping_visits`: more than six shopping URL visits in a rolling seven-day window.
 
-The brain logs visits and speaks warnings for the other events. Threshold warnings
+The brain stays silent and keeps these as context for the next checkout on that site. Threshold warnings
 fire once while the rule remains active per tab; failed threshold deliveries retry
 on the next poll. Failed visit and referral deliveries are logged without retries.
 

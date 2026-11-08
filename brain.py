@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 
 import store
+import sales
 from sales import load_env_file
 from sales import router as sales_router
 from vision import vision
@@ -85,7 +86,8 @@ Every reply is ONE spoken line: under 25 words, plain words, no emoji, no lists,
 It is read aloud by text-to-speech, so it must sound natural spoken.
 
 Only use facts you're given: the purchase, the budget, their spending history, their savings goals, past
-attempts to buy this, what they've said, and a webcam photo if one is attached. Never invent details about their room, desk, or belongings that you
+attempts to buy this, what you noticed on the page before checkout, what they've said, and a webcam photo
+if one is attached. Never invent details about their room, desk, or belongings that you
 weren't shown.
 
 Reply with JSON only: {"line": str, "expression": str, "verdict": str, "need": str}
@@ -95,6 +97,9 @@ Reply with JSON only: {"line": str, "expression": str, "verdict": str, "need": s
   can wait, whether a cheaper option would do. Don't ask about other people's finances.
   If they're saving for a goal, make them weigh the purchase against it. If they've tried to buy this
   before, or said something different last time, call it out.
+  What you noticed on the page (an ad brought them, a sale or countdown, a big cart, lots of shopping
+  today) are classic impulse pushes: bring them up and make them say if they'd buy it without the push.
+  They're reasons to question, not reasons to refuse; a real need still wins.
 - The user answers out loud while looking you in the eyes, and the prompt says how their eye contact went.
   Holding your gaze while arguing shows conviction; looking away is a weak sign worth teasing. Still judge
   mainly on their reasons, not on eye contact alone.
@@ -519,6 +524,7 @@ async def ask_llm(session: dict, final: bool) -> dict:
     remaining = store.remaining(profile)
     recent = ", ".join(f'{p["item"]} ${p["price"]}' for p in profile["purchases"][-5:])
     history = store.context_for(profile, session["item"], session["price"])
+    seen = sales.seen_on(session.get("url"))
     transcript = "\n".join(f"{who}: {text}" for who, text in session["transcript"]) or "(nothing yet)"
     turn = ("Give your FINAL VERDICT now." if final else
             f"Ask question {session['questions'] + 1} of {session['total']}.")
@@ -538,7 +544,8 @@ async def ask_llm(session: dict, final: bool) -> dict:
     prompt = (
         f"Purchase: {session['item']} for ${session['price']} (category: {session['category']}).\n"
         f"Monthly budget ${profile['monthly_budget']}, ${remaining:.0f} left. Recent purchases: {recent}.\n"
-        + (f"{history}\n" if history else "") +
+        + (f"{history}\n" if history else "")
+        + (f"What you noticed on the page before checkout:\n{seen}\n" if seen else "") +
         f"{tier_note}\n{eyes}\n"
         f"Conversation so far:\n{transcript}\n\n{turn}"
     )
@@ -640,23 +647,17 @@ app.include_router(sales_router)
 
 
 class ShoppingAlert(BaseModel):
-    type: Literal["shopping_visit", "ad_referral", "over_budget", "cart_count", "shopping_visits"]
+    type: Literal["shopping_visit", "ad_referral", "cart", "over_budget", "cart_count", "shopping_visits"]
     website: HttpUrl
-    value: float | None = None
+    value: float | None = None  # visits today, or the cart total
+    count: int | None = None    # cart item count
 
 
 @app.post("/alert")
-async def shopping_alert(alert: ShoppingAlert):
-    log("Browser alert:", alert.model_dump(mode="json"))
-    lines = {
-        "ad_referral": "An ad brought you here. Take a breath before you buy.",
-        "over_budget": "That cart is over your weekly budget. Put it back.",
-        "cart_count": "More than five items? Time to review that cart.",
-        "shopping_visits": "That's a lot of shopping visits this week. Take a break.",
-    }
-    if alert.type in lines:
-        await head.expr("suspicious")
-        await speak(lines[alert.type])
+def shopping_alert(alert: ShoppingAlert):
+    """Browsing signals from the extension. Silent: Piggyback brings them up at checkout instead."""
+    log("Browser signal:", alert.model_dump(mode="json"))
+    sales.note_alert(alert.type, str(alert.website), alert.value, alert.count)
     return {"ok": True}
 
 
@@ -989,6 +990,7 @@ async def ws_endpoint(ws: WebSocket):
                     "item": str(msg.get("item", "something")),
                     "price": price,
                     "category": str(msg.get("category", "other")),
+                    "url": str(msg.get("url") or ""),  # the checkout page, to match what the extension noticed
                     "tier": tier, "total": QUESTIONS_BY_TIER[tier],
                     "questions": 0, "answered": 0, "transcript": [], "done": False,
                     "verdict": None, "lock": asyncio.Lock(),

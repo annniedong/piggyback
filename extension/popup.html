@@ -49,19 +49,11 @@
   <hr>
   <label style="color:#1d1d1f;font-size:13px"><input type="checkbox" id="holdEverywhere" checked>
     Hold checkout on all sites (not just the demo store)</label>
-  <label style="color:#1d1d1f;font-size:13px">Weekly budget $
-    <input type="number" id="budget" min="0" step="1" style="width:80px;font:inherit;padding:4px 6px">
-    <span id="saved" class="status" style="margin:0"></span>
-  </label>
   <div class="status" id="lastCart">No cart seen yet. Open your cart page.</div>
   <div class="status" id="lastSale">No sale spotted yet.</div>
-  <div class="status" style="margin-bottom:6px">Test Piggyback's voice:</div>
+  <div class="status">Piggyback brings these up at checkout. Budget and goals live on the
+    <a href="http://localhost:8000/" target="_blank">dashboard</a>.</div>
   <div class="tests">
-    <button class="test" data-expr="alert">Alert</button>
-    <button class="test" data-expr="suspicious">Suspicious</button>
-    <button class="test" data-expr="skeptical">Skeptical</button>
-    <button class="test" data-expr="satisfied">Satisfied</button>
-    <button class="test" data-expr="disappointed">Disappointed</button>
     <button class="test" id="reset">Reset visits</button>
   </div>
   <p class="status">Demo store: <a href="http://localhost:8000/store/" target="_blank">localhost:8000/store</a></p>
