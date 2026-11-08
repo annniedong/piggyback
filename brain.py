@@ -64,7 +64,6 @@ TRACK_GAIN = float(os.getenv("TRACK_GAIN", "0.15"))
 IDLE_LOOK = [float(v) for v in os.getenv("IDLE_LOOK", "0.6,0").split(",")]
 TURN_SECONDS = float(os.getenv("TURN_SECONDS", "1.5"))  # how long a turn toward or away from the user takes
 TRACK_INVERT_PAN = os.getenv("TRACK_INVERT_PAN", "0") == "1"
-TRACK_INVERT_TILT = os.getenv("TRACK_INVERT_TILT", "0") == "1"
 GAZE_INVERT_X = os.getenv("GAZE_INVERT_X", "0") == "1"
 # Pricier purchases mean a longer argument: "close" uses over half of what's left, "over" exceeds it.
 QUESTIONS_BY_TIER = {"easy": 2, "close": 3, "over": 3}
@@ -74,6 +73,8 @@ HERE = Path(__file__).parent
 DECISIONS_FILE = HERE / "decisions.jsonl"
 
 EXPRESSIONS = ["idle", "alert", "suspicious", "skeptical", "satisfied", "disappointed", "thinking"]
+# How long tracking waits after an expression so its head turns can play (matches the steps in pig_eyes.ino).
+EXPR_SECONDS = {"suspicious": 2.7, "skeptical": 2.2, "disappointed": 4.6, "thinking": 3.0}
 VERDICTS = ["release", "timer", "escalate"]
 SERIAL_GLOBS = ["/dev/cu.usbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*", "/dev/cu.usbmodem*"]
 
@@ -278,8 +279,8 @@ class Head:
                 self.ser = None
 
     async def expr(self, name: str):
-        # let the expression's pose (or a slow turn still going) play before tracking resumes
-        tracking["paused_until"] = max(tracking["paused_until"], time.time() + 1.3)
+        # let the expression's head turns (or a slow turn still going) play before tracking resumes
+        tracking["paused_until"] = max(tracking["paused_until"], time.time() + EXPR_SECONDS.get(name, 1.3))
         await asyncio.to_thread(self.send, {"expr": name})
 
 
@@ -447,10 +448,12 @@ def listen(gate=lambda: True):
     t0 = time.time()
     frames = mic_frames()
     tracking["recording"] = True  # hold the head still so servo noise doesn't reach the mic
+    head.send({"hold": 1})  # also stops the ESP32's own turns (thinking sway, a look-back still playing)
     try:
         audio, broke = record_answer(frames, gate)
     finally:
         tracking["recording"] = False
+        head.send({"hold": 0})
         frames.close()
     t1 = time.time()
     text = transcribe(audio) if audio is not None else ""
@@ -967,13 +970,12 @@ async def track_user():
                 tracking["gaze"] = gaze
                 await asyncio.to_thread(head.send, {"gaze": gaze}, True)
             if now > tracking["paused_until"] and not tracking["recording"] and engaged():
-                if abs(ex) < 0.1 and abs(ey) < 0.1:
+                if abs(ex) < 0.1:
                     tracking["user_look"] = list(tracking["look"])  # facing them: remember where they sit
+                # The head only turns left and right; the pupils follow the face up and down.
                 look = list(tracking["look"])
                 if abs(ex) > 0.06:
                     look[0] += TRACK_GAIN * ex * (-1 if TRACK_INVERT_PAN else 1)
-                if abs(ey) > 0.06:
-                    look[1] += TRACK_GAIN * ey * (-1 if TRACK_INVERT_TILT else 1)
                 look = [round(min(max(v, -1.0), 1.0), 3) for v in look]
                 if look != tracking["look"]:
                     tracking["look"] = look
