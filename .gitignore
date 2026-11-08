@@ -7,3 +7,8 @@ decisions.jsonl
 .DS_Store
 models/
 .env
+
+# PlatformIO build output
+.pio/
+firmware/.vscode/*
+!firmware/.vscode/extensions.json

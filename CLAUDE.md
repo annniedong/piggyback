@@ -113,6 +113,7 @@ Brain → ESP32 (USB serial, 115200 baud, one JSON object per line ending in `\n
 {"look": [pan, tilt]}
 {"gaze": [x, y]}
 {"stare": 0.4}
+{"gesture": "shake" | "nod" | "lookback" | "center"}
 {"ping": 1}
 ```
 
@@ -207,10 +208,14 @@ Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods ca
 
 ## ESP32 firmware (firmware/piggyback_esp32)
 
-- Arduino IDE or `arduino-cli` with the ESP32 board package. Libraries: ArduinoJson, Adafruit SSD1306, Adafruit GFX, ESP32Servo.
+- VS Code + PlatformIO (recommended, nothing else to install): install the PlatformIO IDE extension, File → Open Folder → `firmware/` (the folder with `platformio.ini`), then use the PlatformIO toolbar at the bottom (✓ build, → upload, plug icon = serial monitor; type `demo` or `help` there). The first build downloads the ESP32 toolchain (a few minutes; do it before the venue Wi-Fi matters). Or, or from a terminal `pio run -d firmware -t upload` and `pio device monitor -d firmware`. `firmware/platformio.ini` pins the board (`esp32dev`), libraries, and 115200 baud, so every machine builds the same thing.
+- Arduino IDE or `arduino-cli` also works on the same sketch: ESP32 board package plus libraries ArduinoJson, Adafruit SSD1306, Adafruit GFX, ESP32Servo.
 - Suggested pins (confirm for your board): pan servo GPIO 18, tilt servo GPIO 19; left eye on I2C bus 0 (SDA 21, SCL 22); right eye on I2C bus 1 (SDA 25, SCL 26). Write the final pins here once wired.
 - Servos are driven straight from ESP32 PWM pins with ESP32Servo. MG90S servos accept the 3.3 V signal. If that's unreliable, fall back to the PCA9685 on I2C bus 0 (address 0x40, it can share the bus with the left eye).
-- `LIMITS` clamps angles; `PRESETS` maps expressions to (pan, tilt, eyes, seconds). Motion uses smoothstep easing, stepped inside `loop()` without `delay()` so new commands interrupt it.
+- `LIMITS` clamps angles (pan 0–180°; narrow it if the head hits the frame). `PRESETS` maps each expression to eyes plus a list of head steps, each an offset in degrees from where the user is (the last `look`), so turns and nods happen relative to the user: idle drifts ±10° (loops), alert snaps up, skeptical looks away and back, satisfied nods, disappointed does a slow drooping head shake, thinking sways looking up (loops). `{"gesture": ...}` plays shake/nod/lookback/center without changing the eyes (for testing in Serial Monitor). Offsets flip when the user is past center so turns go toward the middle, not into a limit.
+- The ESP32 prints what it's doing as JSON lines (`{"expression":...,"eyes":...}`, `{"move":"skeptical","step":"3/5","doing":"glance back at you","pan":90,"tilt":90,"ms":375}`, `{"move":...,"doing":"done"}`); the brain logs them as `ESP32 <` lines. In Serial Monitor you can also type plain words: an expression or gesture name, `demo` (plays every expression and gesture in turn, any brain command stops it), `step <move>` (one step per Enter, for tuning), `slow` / `normal` (every move at 1/3 speed, or back), or `help`.
+- `MAX_DEG_PER_SEC` (100) caps servo speed: any step that would need more just takes longer. Motion uses smoothstep easing, stepped inside `loop()` without `delay()` so new commands interrupt it.
+- A `look` during a one-shot motion (shake, nod, look-back) waits until it finishes; a `look` cancels the looping idle drift and thinking sway. Idle drift restarts after 5 s with no `look`. The brain pauses tracking per expression (`EXPR_SECONDS` in `brain.py`) to match the step lengths, so update both when tuning.
 - Both I2C buses run at 400 kHz so full-frame eye redraws keep up with `gaze` updates; eyes redraw at most ~15 fps.
 - At boot: move slowly to the home pose, show `idle` eyes, then print `{"ready": true}`.
 - Eyes are drawn with shapes in `drawEye()` (128×64, one color), not bitmaps; `thinking` animates. Swap in bitmaps later if the team draws them.

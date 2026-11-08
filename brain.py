@@ -70,6 +70,8 @@ HERE = Path(__file__).parent
 DECISIONS_FILE = HERE / "decisions.jsonl"
 
 EXPRESSIONS = ["idle", "alert", "suspicious", "skeptical", "satisfied", "disappointed", "thinking"]
+# How long face tracking waits after each expression so its head motion (look-back, nod, shake) can finish.
+EXPR_SECONDS = {"skeptical": 3.0, "satisfied": 1.6, "disappointed": 4.5, "thinking": 3.0}
 VERDICTS = ["release", "timer", "escalate"]
 SERIAL_GLOBS = ["/dev/cu.usbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*", "/dev/cu.usbmodem*"]
 
@@ -272,7 +274,8 @@ class Head:
                 self.ser = None
 
     async def expr(self, name: str):
-        tracking["paused_until"] = time.time() + 1.3  # let the expression's pose play before tracking resumes
+        # Let the expression's head motion play before tracking resumes (matches the firmware's steps).
+        tracking["paused_until"] = time.time() + EXPR_SECONDS.get(name, 1.3)
         await asyncio.to_thread(self.send, {"expr": name})
 
 
