@@ -1,6 +1,7 @@
-// Piggyback content script: holds the final checkout button on ANY site ("Place order",
-// "Complete purchase", "Pay now", "Buy now", ...), runs the conversation with brain.py, and
-// releases or holds the checkout based on the verdict.
+// Piggyback content script: holds the checkout on ANY site, at the first of "Checkout" /
+// "Proceed to checkout" in the cart, or the final "Place order" / "Pay now" / "Buy now", runs the
+// conversation with brain.py, and releases or holds the checkout based on the verdict. Once you go
+// ahead on a site, the rest of that checkout isn't held again for 30 minutes.
 // The demo store marks its button with data-piggyback="place-order" plus data-item, data-price,
 // data-category. On other sites the total is read from the button ("Pay $84.00") or the page's
 // "Order total" / "Total" line. Turn off with "Hold checkout on all sites" in the popup.
@@ -9,15 +10,31 @@
 
 (() => {
   const PLACE_ORDER = /^(place (my |your )?order|place order (and|&) pay|complete (my |your )?(order|purchase)|submit (my |your )?order|confirm (order|purchase|and pay)|pay now|pay( with [a-z ]+)?|pay [$€£]?\s?\d[\d,.]*|buy now|buy it now|purchase|complete checkout)$/i;
+  // The cart's checkout button: the earliest point to step in, before shipping and payment pages.
+  const CHECKOUT = /^(check ?out( now| securely)?|secure check ?out|proceed to (secure )?check ?out|continue to (check ?out|payment)|go to check ?out|start check ?out|begin check ?out|review (and|&) pay)$/i;
+  const CLEARED_FOR_MS = 30 * 60 * 1000; // after going ahead, don't hold the same site's checkout again
+  const site = location.hostname.replace(/^www\./, "");
   const MONEY = /[$€£]\s*([0-9][0-9,]*(?:\.[0-9]{2})?)/;
   const TOTAL_LABELS = [/^\s*(order total|total due|estimated total|grand total|total)\b/i, /^\s*(estimated\s+)?subtotal\b/i];
   const isDemoStore = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && location.pathname.startsWith("/store");
 
   let holdEverywhere = true;
+  let cleared = {}; // site -> time the user went ahead with a checkout there
   try {
-    chrome.storage.local.get({ holdEverywhere: true }, (r) => { holdEverywhere = r.holdEverywhere; });
-    chrome.storage.onChanged.addListener((c) => { if (c.holdEverywhere) holdEverywhere = c.holdEverywhere.newValue; });
+    chrome.storage.local.get({ holdEverywhere: true, clearedSites: {} }, (r) => {
+      holdEverywhere = r.holdEverywhere;
+      cleared = r.clearedSites;
+    });
+    chrome.storage.onChanged.addListener((c) => {
+      if (c.holdEverywhere) holdEverywhere = c.holdEverywhere.newValue;
+      if (c.clearedSites) cleared = c.clearedSites.newValue || {};
+    });
   } catch {}
+  const recentlyCleared = () => Date.now() - (cleared[site] || 0) < CLEARED_FOR_MS;
+  function markCleared() {
+    cleared = { ...cleared, [site]: Date.now() };
+    try { chrome.storage.local.set({ clearedSites: cleared }); } catch {}
+  }
   const REPLY_TIMEOUT_MS = 25000; // LLM + speech; after this we assume the brain is stuck
   const pageLoadedAt = Date.now();
 
@@ -32,10 +49,13 @@
     const marked = el.closest('[data-piggyback="place-order"]');
     if (marked) return marked;
     if (!isDemoStore && !holdEverywhere) return null;
+    if (recentlyCleared()) return null; // already argued and went ahead on this site
     const btn = el.closest("button, input[type=submit], input[type=button], a, [role=button]");
     if (!btn) return null;
-    const label = (btn.innerText || btn.value || btn.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
-    if (label.length <= 40 && PLACE_ORDER.test(label)) return btn;
+    // "Checkout · $45.00" / "Proceed to checkout (2 items)" -> "Checkout" / "Proceed to checkout"
+    const label = (btn.innerText || btn.value || btn.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ")
+      .replace(/\(.*?\)/g, "").replace(/[·•|–-]?\s*[$€£]\s?\d[\d,.]*/g, "").trim();
+    if (label.length <= 40 && (PLACE_ORDER.test(label) || CHECKOUT.test(label))) return btn;
     return null;
   }
 
@@ -177,7 +197,7 @@
       setTimeout(() => { try { ws && ws.close(); } catch {} }, 300);
       ui.close();
       busy = false;
-      if (outcome === "completed") releaseCheckout(btn);
+      if (outcome === "completed") { markCleared(); releaseCheckout(btn); }
     };
 
     const fail = (why) => {
