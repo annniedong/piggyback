@@ -39,7 +39,9 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lit
 EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5-5")
 ADVISOR_MODEL = os.getenv("ADVISOR_MODEL", "claude-opus-5-5")
 USE_ADVISOR = os.getenv("USE_ADVISOR", "1") == "1"
-REVIEW_MODEL = os.getenv("REVIEW_MODEL", "claude-opus-5-5")  # on-demand budget review
+# On-demand budget review: Gemini (same sign-in as the checkout chat) unless a Claude key is set.
+REVIEW_PROVIDER = os.getenv("REVIEW_PROVIDER") or ("claude" if os.getenv("ANTHROPIC_API_KEY") else "gemini")
+REVIEW_MODEL = os.getenv("REVIEW_MODEL", "claude-opus-5-5")  # when REVIEW_PROVIDER=claude
 SERIAL_PORT = os.getenv("SERIAL_PORT")  # None = auto-detect
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "115200"))
 VOICE = os.getenv("VOICE")  # None = system default voice
@@ -426,7 +428,8 @@ _gemini = None
 _gemini_no_thinking = set()  # models that rejected the thinking setting
 
 
-async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
+async def ask_gemini(prompt: str, image: bytes | None = None, system: str = SYSTEM_PROMPT,
+                     schema: dict = RESPONSE_SCHEMA) -> str:
     global _gemini
     from google import genai
     from google.genai import errors, types
@@ -441,9 +444,9 @@ async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
 
     def config(thinking: bool):
         return types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system,
             response_mime_type="application/json",
-            response_json_schema=RESPONSE_SCHEMA,
+            response_json_schema=schema,
             # One short spoken line doesn't need much reasoning, and thinking is most of the wait.
             thinking_config=types.ThinkingConfig(thinking_level=GEMINI_THINKING) if thinking else None,
         )
@@ -577,6 +580,8 @@ REVIEW_PROMPT = """You are Piggyback, a robot piggy bank, giving the user a quic
 spending. Dry, funny, on their side. Base everything only on the data given; never invent numbers.
 Give general budgeting guidance (spending patterns, categories to cut, habits like waiting before
 buying). Do not give investment, tax, credit, or debt advice, and do not recommend financial products.
+If they have savings goals, say how this month's spending affects them. Give them credit for things
+they let go, and call out items still in the waiting room or arguments they lost.
 
 Reply with JSON:
 - summary: what Piggyback says out loud, under 45 words, plain spoken language, no emoji or lists.
@@ -612,6 +617,10 @@ def spending_stats() -> dict:
         "purchases": profile["purchases"],
         "goals": profile["goals"],
         "saved_by_letting_go": store.saved_by_letting_go(profile),
+        "waiting_room": [{k: w[k] for k in ("item", "price", "tries", "status")} for w in profile["waiting"]
+                         if w["status"] in ("waiting", "still_want")],
+        "recent_arguments": [{k: a.get(k) for k in ("item", "price", "verdict", "need")}
+                             for a in profile["arguments"][-10:]],
         "checkouts_completed": sum(d.get("outcome") == "completed" for d in decisions),
         "checkouts_abandoned": sum(d.get("outcome") == "abandoned" for d in decisions),
         "recent_decisions": decisions[-10:],
@@ -620,11 +629,20 @@ def spending_stats() -> dict:
 
 async def budget_review() -> dict:
     stats = spending_stats()
+    data = "This month's data:\n" + json.dumps(stats, indent=1)
+    if REVIEW_PROVIDER == "gemini":
+        result = json.loads(await ask_gemini(data, system=REVIEW_PROMPT, schema=REVIEW_SCHEMA))
+        if not str(result.get("summary", "")).strip():
+            raise ValueError("Gemini returned no summary")
+        if result.get("expression") not in EXPRESSIONS:
+            result["expression"] = "skeptical"
+        result["tips"] = [str(t) for t in result.get("tips", [])][:3]
+        return result
     resp = await claude_client().beta.messages.create(
         model=REVIEW_MODEL,
         max_tokens=16000,
         system=REVIEW_PROMPT,
-        messages=[{"role": "user", "content": "This month's data:\n" + json.dumps(stats, indent=1)}],
+        messages=[{"role": "user", "content": data}],
         output_config={"effort": "medium", "format": {"type": "json_schema", "schema": REVIEW_SCHEMA}},
         fallbacks="default",
         betas=["server-side-fallback-2026-07-01"],

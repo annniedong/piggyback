@@ -16,8 +16,7 @@ Pitch idea: digital money is invisible, so Piggyback gives your spending a physi
 Chrome extension ──WebSocket /ws────► brain.py (laptop, one FastAPI app :8000)
 bot/browser.py ───HTTP POST /alert──►    │  Gemini Flash (Vertex, piggyback-brain): checkout questions + verdicts
 extension ────────POST /sale, /cart──►   │  sales.py: page reading (Gemini flash-lite, Alisha's key)
-                                         │  Claude: on-demand budget review (GET /review)
-                                         │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
+                                               │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
                                          │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
                                          │  store.py + dashboard.html: profile, goals, waiting room (GET /)
                                          └──USB serial (JSON lines)──► ESP32 firmware
@@ -85,7 +84,7 @@ Budget review (HTTP, extension button → `GET http://localhost:8000/review`, ad
  "summary": "...", "tips": ["...", "...", "..."], "expression": "skeptical", "error": null}
 ```
 
-The numbers are computed in code from the profile (`store.py`) and `decisions.jsonl`; Claude also sees the savings goals and money saved by letting things go. Claude only writes `summary`, `tips`, and `expression`. It gives general budgeting guidance only (no investment, tax, credit, or product advice). If Claude fails, `summary` is a plain computed sentence, `tips` is empty, and `error` says why. Takes a few seconds, so show a loading state.
+The numbers are computed in code from the profile (`store.py`) and `decisions.jsonl`; The AI also sees savings goals, money saved by letting things go, the waiting room, and recent arguments. It runs on Gemini through the same Vertex sign-in as the checkout chat (about 4 s), or on Claude when `ANTHROPIC_API_KEY` is set. The AI only writes `summary`, `tips`, and `expression`. It gives general budgeting guidance only (no investment, tax, credit, or product advice). If the AI fails, `summary` is a plain computed sentence, `tips` is empty, and `error` says why. Takes a few seconds, so show a loading state.
 
 Profile API (HTTP, used by the dashboard; every response is the dashboard summary):
 
@@ -161,7 +160,7 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`): the chat retries on this model when `GEMINI_MODEL` returns 429/503/504. The free tier allows 5 requests/min per model and a checkout uses up to 4, so back-to-back rehearsals on a free key hit it.
 - `GEMINI_WEB_MODEL` (default `gemini-3.5-flash-lite`, ~1 s): model for the page-reading checks in `sales.py`
 - `ANTHROPIC_API_KEY`, `EXECUTOR_MODEL` (default `claude-sonnet-5-5`), `ADVISOR_MODEL` (default `claude-opus-5-5`), `USE_ADVISOR` (default `1`; Claude advisor tool, beta `advisor-tool-2026-03-01`, used only for the final verdict so questions stay fast). Claude requests also enable server-side refusal fallbacks (`fallbacks: "default"`).
-- `REVIEW_MODEL` (default `claude-opus-5-5`): model for the budget review; needs `ANTHROPIC_API_KEY`
+- `REVIEW_PROVIDER` (default `gemini`, or `claude` when `ANTHROPIC_API_KEY` is set): who writes the budget review. `REVIEW_MODEL` (default `claude-opus-5-5`) is the Claude model; Gemini uses `GEMINI_MODEL`.
 - `SCRAPE_AI` (default `auto`): when the web-scraping checks (`/sale`, `/cart` in `sales.py`) call the LLM. `auto` = free local check first, LLM only when it isn't sure (lone "Sale" word, struck prices with no stated offer, cart missing a number or two local readers disagreeing); `always`; `never`. The checkout chat always uses the LLM.
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
