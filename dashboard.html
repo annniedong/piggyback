@@ -287,7 +287,7 @@ const ago = (stamp) => {
   const days = Math.floor((Date.now() - new Date(stamp)) / 86400000);
   return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
 };
-const STAMPS = {release: "Approved", timer: "Cool off", escalate: "Buddy called"};
+const STAMPS = {release: "Approved", timer: "Cool off", escalate: "Over budget"};
 let state = null;
 
 async function api(path, method = "GET", body) {
