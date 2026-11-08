@@ -7,3 +7,4 @@ decisions.jsonl
 .DS_Store
 models/
 .env
+firmware/**/secrets.h

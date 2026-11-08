@@ -13,10 +13,10 @@
 
   Connections (both work at the same time):
     USB serial at 115200 baud
-    Wi-Fi: the ESP32 joins WIFI_SSID (must be 2.4 GHz) and listens for one
-    TCP client on TCP_PORT. Connect to pig.local:3333, or to the IP address
-    printed in the Serial Monitor. A new client replaces the old one.
-    Leave WIFI_SSID empty ("") to turn Wi-Fi off.
+    Wi-Fi (optional, off by default): only if secrets.h sets WIFI_SSID / WIFI_PASS.
+    Then the ESP32 joins that network (must be 2.4 GHz) and listens for one TCP
+    client on TCP_PORT. Connect to pig.local:3333, or to the IP address printed in
+    the Serial Monitor. A new client replaces the old one. brain.py only uses USB.
 
   Commands (one per line, case-insensitive, same over USB and Wi-Fi):
     PING                 -> PONG
@@ -52,10 +52,18 @@
 
 // ======================= CONFIG =======================
 
-// Wi-Fi: use a phone hotspot on 2.4 GHz (iPhone: turn on "Maximize Compatibility").
-// Don't push real passwords to a public repo. Set WIFI_SSID to "" for USB only.
-#define WIFI_SSID  "your-hotspot-name"
-#define WIFI_PASS  "your-hotspot-password"
+// Wi-Fi is off unless secrets.h (next to this file, git-ignored so a hotspot password never
+// reaches the public repo) defines WIFI_SSID and WIFI_PASS. Copy secrets.example.h to secrets.h.
+// Use a phone hotspot on 2.4 GHz (iPhone: turn on "Maximize Compatibility").
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID  ""
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS  ""
+#endif
 #define MDNS_NAME  "pig"     // reachable as pig.local
 #define TCP_PORT   3333
 
