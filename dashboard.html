@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piggyback</title>
+<style>
+  :root {
+    --bg: #fdf6f7; --card: #ffffff; --text: #2b2024; --muted: #7a6a70; --line: #ecdfe2;
+    --pink: #e0708e; --pink-soft: #fbe3ea; --green: #2f8a5b; --green-soft: #e1f3e9;
+    --amber: #9a6200; --amber-soft: #fbefd9; --red: #b33a3a; --red-soft: #f9e2e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1517; --card: #261e21; --text: #f4eaed; --muted: #b3a2a8; --line: #3a2e32;
+      --pink: #f08ea8; --pink-soft: #4a2732; --green: #7fd3a5; --green-soft: #1f3a2c;
+      --amber: #f0c06a; --amber-soft: #3d3020; --red: #f19a9a; --red-soft: #4a2626;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 -apple-system, system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 16px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 26px; font-weight: 600; }
+  h1 span { color: var(--pink); }
+  h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+  .muted { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat, .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  .stat p { margin: 0; color: var(--muted); font-size: 13px; }
+  .stat b { font-size: 26px; font-weight: 600; }
+  .stat small { color: var(--muted); font-size: 13px; }
+  .good { color: var(--green); }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .row:first-of-type { border-top: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .bar { height: 10px; background: var(--pink-soft); border-radius: 5px; margin-top: 6px; overflow: hidden; }
+  .bar div { height: 100%; background: var(--pink); border-radius: 5px; }
+  .goal { padding: 10px 0; border-top: 1px solid var(--line); }
+  .goal:first-of-type { border-top: 0; }
+  .goal-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  button, input, select { font: inherit; font-size: 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--pink); }
+  button.primary { background: var(--pink); border-color: var(--pink); color: #fff; }
+  input { min-width: 0; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  form input[name=name] { flex: 2 1 160px; }
+  form input[type=number], form input[type=date] { flex: 1 1 110px; }
+  .pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+  .release { background: var(--green-soft); color: var(--green); }
+  .timer { background: var(--amber-soft); color: var(--amber); }
+  .escalate { background: var(--red-soft); color: var(--red); }
+  .empty { color: var(--muted); font-size: 14px; margin: 0; }
+  .error { color: var(--red); font-size: 13px; margin: 8px 0 0; }
+  q { font-style: italic; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Piggy<span>back</span></h1>
+    <span class="sub" id="status">Loading…</span>
+  </header>
+
+  <section class="stats">
+    <div class="stat"><p>Left this month</p><b id="remaining">–</b> <small id="budget-of"></small></div>
+    <div class="stat"><p>Saved by putting it back</p><b class="good" id="saved">–</b></div>
+    <div class="stat"><p>Arguments won</p><b id="won">–</b> <small id="won-of"></small></div>
+  </section>
+
+  <section class="card">
+    <h2>Saving for</h2>
+    <p class="muted">Piggyback weighs every purchase against these.</p>
+    <div id="goals"></div>
+    <form id="goal-form">
+      <input name="name" placeholder="Spring break trip" required>
+      <input name="target" type="number" min="1" step="1" placeholder="Target $" required>
+      <input name="deadline" type="date" aria-label="Deadline (optional)">
+      <button class="primary">Add goal</button>
+    </form>
+    <p class="error" id="goal-error" hidden></p>
+  </section>
+
+  <section class="card">
+    <h2>Waiting room</h2>
+    <p class="muted">Things Piggyback made you wait on. Still want them?</p>
+    <div id="waiting"></div>
+  </section>
+
+  <section class="card">
+    <h2>Recent arguments</h2>
+    <div id="arguments"></div>
+  </section>
+
+  <section class="card">
+    <h2>Monthly budget</h2>
+    <form id="budget-form">
+      <input name="budget" type="number" min="1" step="1" aria-label="Monthly budget in dollars" required>
+      <button>Save budget</button>
+    </form>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (n) => "$" + Math.round(n).toLocaleString();
+// Item names come from shopping pages, so everything user-visible is escaped.
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const ago = (stamp) => {
+  const days = Math.floor((Date.now() - new Date(stamp)) / 86400000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+};
+let state = null;
+
+async function api(path, method = "GET", body) {
+  const res = await fetch(path, {method, headers: {"Content-Type": "application/json"},
+                                 body: body ? JSON.stringify(body) : undefined});
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  return res.json();
+}
+
+function render(s) {
+  state = s;
+  $("remaining").textContent = money(s.remaining);
+  $("budget-of").textContent = "of " + money(s.monthly_budget);
+  $("saved").textContent = money(s.saved_by_letting_go);
+  $("won").textContent = s.arguments_won;
+  $("won-of").textContent = "of " + s.arguments_total;
+  if (document.activeElement?.name !== "budget") document.querySelector("#budget-form input").value = s.monthly_budget;
+
+  $("goals").innerHTML = s.goals.length ? s.goals.map((g) => {
+    const pct = Math.min(100, Math.round(100 * g.saved / g.target));
+    return `<div class="goal">
+      <div class="goal-head"><span>${esc(g.name)}</span>
+        <span class="sub">${money(g.saved)} / ${money(g.target)}${g.deadline ? " · by " + esc(g.deadline) : ""}</span></div>
+      <div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="actions">
+        <input type="number" step="1" placeholder="$" aria-label="Amount" style="width:90px" data-amount="${g.id}">
+        <button data-save="${g.id}">Add savings</button>
+        <button data-delete="${g.id}">Remove</button>
+      </div></div>`;
+  }).join("") : `<p class="empty">Add a goal so Piggyback has something to protect.</p>`;
+
+  const goalOptions = `<option value="">Just let it go</option>` +
+    s.goals.map((g) => `<option value="${g.id}">Put it toward ${esc(g.name)}</option>`).join("");
+  $("waiting").innerHTML = s.waiting.length ? s.waiting.map((w) => `<div class="row">
+      <span>${esc(w.item)} · ${money(w.price)}<br>
+        <span class="sub">Tried ${w.tries} time${w.tries === 1 ? "" : "s"} · first wanted ${ago(w.first_wanted)}${w.status === "still_want" ? " · you still want it" : ""}</span></span>
+      <span class="actions" style="margin:0">
+        <select data-goal-for="${w.id}" aria-label="Where the money goes">${goalOptions}</select>
+        <button class="primary" data-letgo="${w.id}">Let it go</button>
+        <button data-still="${w.id}">Still want</button>
+      </span></div>`).join("") : `<p class="empty">Nothing waiting. Piggyback is proud of you, for now.</p>`;
+
+  $("arguments").innerHTML = s.arguments.length ? s.arguments.map((a) => `<div class="row">
+      <span>${esc(a.item)} · ${money(a.price)}<br>
+        <span class="sub">${a.said.length ? `<q>${esc(a.said.reduce((x, y) => y.length > x.length ? y : x))}</q> · ` : ""}${ago(a.time)}</span></span>
+      <span class="pill ${esc(a.verdict)}">${esc(a.verdict)}${a.need && a.need !== "unclear" ? " · " + esc(a.need) : ""}</span>
+    </div>`).join("") : `<p class="empty">No arguments yet. Go to a checkout page.</p>`;
+}
+
+async function refresh() {
+  try {
+    render(await api("/profile"));
+    $("status").textContent = "Updated " + new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+  } catch (e) {
+    $("status").textContent = "Can't reach Piggyback";
+  }
+}
+
+async function act(path, method, body) {
+  try { render(await api(path, method, body)); } catch (e) { alert(e.message); }
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  if (t.dataset.save) {
+    const input = document.querySelector(`[data-amount="${t.dataset.save}"]`);
+    const amount = Number(input.value);
+    if (!amount) { input.focus(); return; }
+    act(`/goals/${t.dataset.save}/save`, "POST", {amount});
+  } else if (t.dataset.delete) {
+    act(`/goals/${t.dataset.delete}`, "DELETE");
+  } else if (t.dataset.letgo) {
+    const goal = document.querySelector(`[data-goal-for="${t.dataset.letgo}"]`).value;
+    act(`/waiting/${t.dataset.letgo}/let_go`, "POST", {goal_id: goal || null});
+  } else if (t.dataset.still) {
+    act(`/waiting/${t.dataset.still}/still_want`, "POST");
+  }
+});
+
+$("goal-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const err = $("goal-error");
+  if (!f.get("name").trim() || !(Number(f.get("target")) > 0)) {
+    err.textContent = "Enter a name and a target above $0."; err.hidden = false; return;
+  }
+  err.hidden = true;
+  await act("/goals", "POST", {name: f.get("name").trim(), target: Number(f.get("target")), deadline: f.get("deadline") || null});
+  e.target.reset();
+});
+
+$("budget-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  act("/budget", "PUT", {monthly_budget: Number(new FormData(e.target).get("budget"))});
+});
+
+refresh();
+// Live during the demo: the waiting room fills in as Piggyback gives verdicts.
+setInterval(() => { if (!document.activeElement?.matches("input, select")) refresh(); }, 4000);
+</script>
+</body>
+</html>

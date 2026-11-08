@@ -10,17 +10,23 @@ import os
 import random
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import serial
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
+
+import store
+from vision import vision
 
 # ---------------------------------------------------------------- config
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # gemini | claude | mock
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_THINKING = os.getenv("GEMINI_THINKING", "low")  # low | medium | high (some models: minimal); lower = faster
 EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5-5")
 ADVISOR_MODEL = os.getenv("ADVISOR_MODEL", "claude-opus-5-5")
 USE_ADVISOR = os.getenv("USE_ADVISOR", "1") == "1"
@@ -29,11 +35,24 @@ SERIAL_PORT = os.getenv("SERIAL_PORT")  # None = auto-detect
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "115200"))
 VOICE = os.getenv("VOICE")  # None = system default voice
 TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
-QUESTIONS_PER_PURCHASE = 2
-MONTHLY_BUDGET = 600
+LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+MIC_DEVICE = os.getenv("MIC_DEVICE", "logitech")  # picked by name so iPhone/AirPods mics can't take over
+MAX_LISTEN_SECONDS = float(os.getenv("MAX_LISTEN_SECONDS", "8"))
+NO_SPEECH_SECONDS = float(os.getenv("NO_SPEECH_SECONDS", "6"))
+VISION = os.getenv("VISION", "1") == "1"  # webcam in the head: tracking + eye contact
+SEND_FRAMES = os.getenv("SEND_FRAMES", "1") == "1"  # attach a webcam frame to Gemini calls
+CONFIRM_SECONDS = float(os.getenv("CONFIRM_SECONDS", "3"))  # eye contact needed to confirm a release
+CONFIRM_WAIT = float(os.getenv("CONFIRM_WAIT", "10"))
+TRACK_GAIN = float(os.getenv("TRACK_GAIN", "0.15"))
+TRACK_INVERT_PAN = os.getenv("TRACK_INVERT_PAN", "0") == "1"
+TRACK_INVERT_TILT = os.getenv("TRACK_INVERT_TILT", "0") == "1"
+GAZE_INVERT_X = os.getenv("GAZE_INVERT_X", "0") == "1"
+# Pricier purchases mean a longer argument: "close" uses over half of what's left, "over" exceeds it.
+QUESTIONS_BY_TIER = {"easy": 2, "close": 3, "over": 3}
+LOOK_AWAY_GRACE = float(os.getenv("LOOK_AWAY_GRACE", "0.6"))  # seconds of looking away that breaks an answer
 
 HERE = Path(__file__).parent
-BUDGET_FILE = HERE / "budget.json"
 DECISIONS_FILE = HERE / "decisions.jsonl"
 
 EXPRESSIONS = ["idle", "alert", "suspicious", "skeptical", "satisfied", "disappointed", "thinking"]
@@ -46,19 +65,41 @@ the user's desk and judges their online purchases before checkout. Your catchphr
 Personality: dry, skeptical, funny, a little dramatic, but on the user's side. You care about their
 budget more than they do. Never mean about the person, only about the purchase.
 
+Your job is to stop impulse buys, not necessities. Tell needs from wants:
+- A need is something they rely on that broke or ran out, health or safety, or something work or school
+  requires, and it can't reasonably wait. A need deserves a release even when it hurts the budget; you
+  can still nudge them toward a cheaper option.
+- A want is an upgrade, a duplicate, a treat, a gift, or "it's on sale". Wants that strain the budget wait.
+- Believe a reason that is specific and stays consistent. A vague reason, or a story that changes between
+  answers, is a want until proven otherwise.
+
 Every reply is ONE spoken line: under 25 words, plain words, no emoji, no lists, no stage directions.
 It is read aloud by text-to-speech, so it must sound natural spoken.
 
-Reply with JSON only: {"line": str, "expression": str, "verdict": str}
+Only use facts you're given: the purchase, the budget, their spending history, their savings goals, past
+attempts to buy this, what they've said, and a webcam photo if one is attached. Never invent details about their room, desk, or belongings that you
+weren't shown.
+
+Reply with JSON only: {"line": str, "expression": str, "verdict": str, "need": str}
 - expression is one of: idle, alert, suspicious, skeptical, satisfied, disappointed, thinking.
 - When asked a question turn, ask ONE short pointed question about the purchase and set verdict to "none".
-  Good questions probe need vs. want, whether they already own something similar, and whether it fits the budget.
+  Good questions let them prove a need: what happened to the old one, what they use it for, whether it
+  can wait, whether a cheaper option would do. Don't ask about other people's finances.
+  If they're saving for a goal, make them weigh the purchase against it. If they've tried to buy this
+  before, or said something different last time, call it out.
+- The user answers out loud while looking you in the eyes, and the prompt says how their eye contact went.
+  Holding your gaze while arguing shows conviction; looking away is a weak sign worth teasing. Still judge
+  mainly on their reasons, not on eye contact alone.
 - When asked for the final verdict, set verdict to one of:
-  "release" (reasonable purchase, let it go through),
+  "release" (reasonable purchase or a proven need, let it go through),
   "timer" (probably impulse, make them wait and reconsider),
   "escalate" (bad idea or way over budget, tell their accountability buddy).
   The line announces the verdict in character. Use "satisfied" for release, "skeptical" or
-  "disappointed" for timer, "disappointed" for escalate."""
+  "disappointed" for timer, "disappointed" for escalate.
+- need is your current read: "need" (they've shown a real necessity), "want", or "unclear".
+- If your final need is "need", the verdict is "release": a timer on something urgent only hurts them.
+  If the price stings, say so and point them to a cheaper option in the line, but still release.
+  Timer and escalate are for wants and unclear cases."""
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -66,8 +107,9 @@ RESPONSE_SCHEMA = {
         "line": {"type": "string"},
         "expression": {"type": "string", "enum": EXPRESSIONS},
         "verdict": {"type": "string", "enum": ["none"] + VERDICTS},
+        "need": {"type": "string", "enum": ["need", "want", "unclear"]},
     },
-    "required": ["line", "expression", "verdict"],
+    "required": ["line", "expression", "verdict", "need"],
     "additionalProperties": False,
 }
 
@@ -78,6 +120,10 @@ RULE_LINES = {
     "over_budget": ("escalate", "disappointed", "That's more than your whole remaining budget. Put it back. I'm telling your buddy."),
     "half_budget": ("timer", "skeptical", "That eats more than half of what's left this month. Cool off first."),
     "invalid_verdict": ("timer", "skeptical", "I'm not sure about this one. Wait a minute and think it over."),
+    "no_eye_contact": ("timer", "disappointed", "You can't even look me in the eye. Wait a minute."),
+    "looked_away": ("timer", "disappointed", "You looked away twice. Argument over."),
+    "over_budget_argued": ("timer", "skeptical", "That's over your budget, so no. But you argued it to my face, "
+                                                 "so you get a timer instead of a call to your buddy."),
 }
 
 
@@ -85,43 +131,46 @@ def log(*args):
     print(datetime.now().strftime("%H:%M:%S"), *args, flush=True)
 
 
-# ---------------------------------------------------------------- budget
+# ---------------------------------------------------------------- budget rules
 
-def load_budget() -> dict:
-    if BUDGET_FILE.exists():
-        return json.loads(BUDGET_FILE.read_text())
-    # Seed a fake month so the demo has history to judge against.
-    today = date.today()
-    seed = [("Coffee subscription", 24, "food"), ("Groceries", 142, "food"), ("Headphones case", 18, "electronics"),
-            ("Concert ticket", 85, "fun"), ("Takeout", 37, "food"), ("Phone charger", 22, "electronics"),
-            ("Takeout", 41, "food")]
-    purchases = [{"item": i, "price": p, "category": c, "date": str(today - timedelta(days=3 * n + 1))}
-                 for n, (i, p, c) in enumerate(seed)]
-    budget = {"monthly_budget": MONTHLY_BUDGET, "purchases": purchases}
-    save_budget(budget)
-    return budget
-
-
-def save_budget(budget: dict):
-    BUDGET_FILE.write_text(json.dumps(budget, indent=2))
-
-
-def remaining_budget(budget: dict) -> float:
-    return budget["monthly_budget"] - sum(p["price"] for p in budget["purchases"])
-
-
-def apply_rules(verdict, price: float, remaining: float):
-    """Hard rules can only make a verdict stricter. Returns (verdict, rule or None)."""
+def budget_tier(price: float, remaining: float) -> str:
     if price > remaining:
+        return "over"
+    return "close" if price > remaining / 2 else "easy"
+
+
+def apply_rules(verdict, price: float, remaining: float, clean: bool = False, failed: bool = False,
+                need: bool = False):
+    """Hard rules can only make a verdict stricter. Returns (verdict, rule or None).
+
+    clean: the user answered every question with unbroken, camera-verified eye contact.
+    failed: they looked away mid-answer twice, which ends the argument.
+    need: the AI judged it a genuine necessity.
+    A clean argument can save a close-to-budget release, or soften over-budget from escalate to timer.
+    An over-budget purchase is only released for a clean argument that proved a necessity."""
+    tier = budget_tier(price, remaining)
+    if failed:
+        if verdict == "escalate" or tier == "over":
+            return "escalate", "looked_away"
+        return "timer", "looked_away"
+    if tier == "over":
+        if clean and need and verdict == "release":
+            return "release", "necessity"
+        if clean and verdict in ("release", "timer"):
+            return "timer", "over_budget_argued"
         return "escalate", "over_budget"
     if verdict not in VERDICTS:
         return "timer", "invalid_verdict"
-    if verdict == "release" and price > remaining / 2:
+    if verdict == "release" and tier == "close" and not clean:
         return "timer", "half_budget"
     return verdict, None
 
 
 # ---------------------------------------------------------------- ESP32 link
+
+# Shared with the tracking loop: expressions pause head tracking, recording freezes the head.
+tracking = {"paused_until": 0.0, "recording": False, "look": [0.0, 0.0], "gaze": [0.0, 0.0], "session": None}
+
 
 class Head:
     """USB serial link to the ESP32. If it's unplugged, commands are printed instead."""
@@ -169,23 +218,26 @@ class Head:
                 line = ser.readline().decode(errors="replace").strip()
             except (serial.SerialException, OSError):
                 break
-            if line:
+            if line and line != '{"ok":true}':
                 log("ESP32 <", line)
         log("ESP32 reader stopped")
 
     def connected(self) -> bool:
         return self.ser is not None
 
-    def send(self, cmd: dict):
+    def send(self, cmd: dict, quiet: bool = False):
+        """quiet=True for the many-per-second tracking commands, so they don't flood the log."""
         with self.lock:
             if self.ser is None:
                 self._open()
             if self.ser is None:
-                log("ESP32 (offline) >", json.dumps(cmd))
+                if not quiet:
+                    log("ESP32 (offline) >", json.dumps(cmd))
                 return
             try:
                 self.ser.write((json.dumps(cmd) + "\n").encode())
-                log("ESP32 >", json.dumps(cmd))
+                if not quiet:
+                    log("ESP32 >", json.dumps(cmd))
             except (serial.SerialException, OSError) as e:
                 log("ESP32 write failed, will reconnect:", e)
                 try:
@@ -195,6 +247,7 @@ class Head:
                 self.ser = None
 
     async def expr(self, name: str):
+        tracking["paused_until"] = time.time() + 1.3  # let the expression's pose play before tracking resumes
         await asyncio.to_thread(self.send, {"expr": name})
 
 
@@ -209,6 +262,7 @@ speech_proc = None
 async def speak(line: str):
     """Speak with macOS `say`, cutting off anything still being said."""
     global speech_proc
+    log("🐷 Piggyback says:", line)
     if speech_proc and speech_proc.returncode is None:
         speech_proc.terminate()
     args = ["say"] + (["-v", VOICE] if VOICE else []) + [line]
@@ -216,6 +270,120 @@ async def speak(line: str):
         speech_proc = await asyncio.create_subprocess_exec(*args)
     except FileNotFoundError:
         log("SAY (no `say` command):", line)
+
+
+async def done_speaking():
+    if speech_proc and speech_proc.returncode is None:
+        await speech_proc.wait()
+
+
+# ---------------------------------------------------------------- speech input
+
+SAMPLE_RATE = 16000
+FRAME = 480  # 30 ms at 16 kHz
+
+_whisper = None
+
+
+def whisper_model():
+    global _whisper
+    if _whisper is None:
+        from faster_whisper import WhisperModel
+        _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")  # downloads on first use
+    return _whisper
+
+
+def pick_mic():
+    """(index, name): first input whose name contains MIC_DEVICE, else the system default input
+    unless it's a phone or virtual device, else the first input that isn't."""
+    import sounddevice as sd
+    from vision import SKIP_DEVICES
+
+    inputs = [(i, d["name"]) for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0]
+    for i, name in inputs:
+        if MIC_DEVICE.lower() in name.lower():
+            return i, name
+    usable = [(i, n) for i, n in inputs if not any(word in n.lower() for word in SKIP_DEVICES)]
+    default = sd.default.device[0]
+    for i, name in usable:
+        if i == default:
+            return i, name
+    return usable[0] if usable else (None, "system default")
+
+
+def mic_frames():
+    import sounddevice as sd
+
+    device, name = pick_mic()
+    log(f"Mic: {name}")
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=FRAME,
+                        device=device) as stream:
+        while True:
+            data, _ = stream.read(FRAME)
+            yield data[:, 0].copy()
+
+
+def record_answer(frames, gate=lambda: True):
+    """Collect audio from the first loud frame until a 1 s pause. Returns (audio or None, broke).
+
+    gate() is checked every frame (is the user looking at the pig?). Speech only starts counting while
+    it's true, and once they're talking, looking away for LOOK_AWAY_GRACE seconds breaks the answer:
+    recording stops and broke=True."""
+    import numpy as np
+    from collections import deque
+
+    noise, preroll, voiced = [], deque(maxlen=10), []
+    started, silence, elapsed, peak = False, 0.0, 0.0, 0.0
+    for f in frames:
+        elapsed += FRAME / SAMPLE_RATE
+        rms = float(np.sqrt(np.mean(f ** 2)))
+        if len(noise) < 10:  # first 0.3 s measures the room so a noisy venue doesn't count as speech
+            noise.append(rms)
+            continue
+        loud = rms > max(float(np.median(noise)) * 3, 0.01)
+        looking = gate()
+        if not started:
+            preroll.append(f)
+            if loud and looking:
+                started, away = True, 0.0
+                voiced.extend(preroll)
+            elif elapsed > NO_SPEECH_SECONDS:
+                return None, False
+            continue
+        voiced.append(f)
+        away = 0.0 if looking else away + FRAME / SAMPLE_RATE
+        if away > LOOK_AWAY_GRACE:
+            return np.concatenate(voiced), True
+        # The room can get louder after the first 0.3 s (fans, the mic's auto gain), so "done talking"
+        # also counts anything well below their speaking volume as a pause.
+        peak = max(peak, rms)
+        talking = loud and rms > peak * 0.2
+        silence = 0.0 if talking else silence + FRAME / SAMPLE_RATE
+        if silence > 1.0 or elapsed > MAX_LISTEN_SECONDS:
+            break
+    return (np.concatenate(voiced) if voiced else None), False
+
+
+def transcribe(audio) -> str:
+    segments, _ = whisper_model().transcribe(audio, language="en", beam_size=1)
+    return " ".join(s.text.strip() for s in segments).strip()
+
+
+def listen(gate=lambda: True):
+    """Returns (transcript, broke). broke=True means they looked away mid-answer."""
+    t0 = time.time()
+    frames = mic_frames()
+    tracking["recording"] = True  # hold the head still so servo noise doesn't reach the mic
+    try:
+        audio, broke = record_answer(frames, gate)
+    finally:
+        tracking["recording"] = False
+        frames.close()
+    t1 = time.time()
+    text = transcribe(audio) if audio is not None else ""
+    spoken = len(audio) / SAMPLE_RATE if audio is not None else 0
+    log(f"Timing: listened {t1 - t0:.1f}s (speech {spoken:.1f}s), transcribed in {time.time() - t1:.1f}s")
+    return text, broke
 
 
 # ---------------------------------------------------------------- LLM
@@ -231,23 +399,51 @@ def parse_reply(text: str, default: dict) -> dict:
         log("Bad LLM JSON, using default:", e, repr(text[:200]))
         return dict(default)
     expression = data.get("expression") if data.get("expression") in EXPRESSIONS else default["expression"]
-    return {"line": line, "expression": expression, "verdict": data.get("verdict", "none")}
+    return {"line": line, "expression": expression, "verdict": data.get("verdict", "none"),
+            "need": data.get("need", "unclear")}
 
 
-async def ask_gemini(prompt: str) -> str:
+FRAME_NOTE = ("\n\nAttached is a webcam photo of the user taken just now from Piggyback's eyes. You may playfully "
+              "react to an object clearly visible in it (something they're holding or wearing). Don't comment on "
+              "their eyes, face, or expression: the photo may catch a blink, and eye contact is measured separately "
+              "and reported above. Never judge honesty from the photo or base the verdict on it.")
+
+
+_gemini = None
+_gemini_thinking_ok = True  # flips off if the model rejects the thinking setting
+
+
+async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
+    global _gemini, _gemini_thinking_ok
     from google import genai
     from google.genai import types
 
-    client = genai.Client()  # reads GEMINI_API_KEY
-    resp = await client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
+    if _gemini is None:
+        # One client for the whole run, so each turn reuses the connection.
+        # Reads GEMINI_API_KEY, or the GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_* settings.
+        _gemini = genai.Client()
+    contents = prompt
+    if image:
+        contents = [types.Part.from_bytes(data=image, mime_type="image/jpeg"), prompt + FRAME_NOTE]
+
+    def config(thinking: bool):
+        return types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
             response_json_schema=RESPONSE_SCHEMA,
-        ),
-    )
+            # One short spoken line doesn't need much reasoning, and thinking is most of the wait.
+            thinking_config=types.ThinkingConfig(thinking_level=GEMINI_THINKING) if thinking else None,
+        )
+
+    try:
+        resp = await _gemini.aio.models.generate_content(
+            model=GEMINI_MODEL, contents=contents, config=config(_gemini_thinking_ok))
+    except Exception as e:
+        if not _gemini_thinking_ok:
+            raise
+        log(f"Gemini rejected thinking_level={GEMINI_THINKING}, retrying without it:", repr(e))
+        _gemini_thinking_ok = False
+        resp = await _gemini.aio.models.generate_content(model=GEMINI_MODEL, contents=contents, config=config(False))
     return resp.text or ""
 
 
@@ -286,34 +482,55 @@ async def ask_claude(prompt: str, use_advisor: bool) -> str:
     return texts[-1] if texts else ""
 
 
-def ask_mock(final: bool) -> str:
+MOCK_QUESTIONS = [
+    {"line": "Do you already own something that does this?", "expression": "suspicious", "verdict": "none"},
+    {"line": "Would you still want it if it arrived next month?", "expression": "skeptical", "verdict": "none"},
+    {"line": "What would you give up this month to pay for it?", "expression": "skeptical", "verdict": "none"},
+]
+
+
+def ask_mock(final: bool, question_number: int = 0) -> str:
+    """Canned lines for testing without an API key. Doesn't read the answers, unlike the real AI."""
     if final:
         return json.dumps(random.choice([
             {"line": "Fine. It's reasonable. Go ahead, but I'm watching.", "expression": "satisfied", "verdict": "release"},
             {"line": "Sounds like an impulse. Sit with it for a minute.", "expression": "skeptical", "verdict": "timer"},
         ]))
-    return json.dumps(random.choice([
-        {"line": "Do you already own something that does this?", "expression": "suspicious", "verdict": "none"},
-        {"line": "Would you still want it if it arrived next month?", "expression": "skeptical", "verdict": "none"},
-    ]))
+    return json.dumps(MOCK_QUESTIONS[question_number % len(MOCK_QUESTIONS)])
 
 
 async def ask_llm(session: dict, final: bool) -> dict:
-    budget = load_budget()
-    remaining = remaining_budget(budget)
-    recent = ", ".join(f'{p["item"]} ${p["price"]}' for p in budget["purchases"][-5:])
+    profile = store.load()
+    remaining = store.remaining(profile)
+    recent = ", ".join(f'{p["item"]} ${p["price"]}' for p in profile["purchases"][-5:])
+    history = store.context_for(profile, session["item"], session["price"])
     transcript = "\n".join(f"{who}: {text}" for who, text in session["transcript"]) or "(nothing yet)"
     turn = ("Give your FINAL VERDICT now." if final else
-            f"Ask question {session['questions'] + 1} of {QUESTIONS_PER_PURCHASE}.")
+            f"Ask question {session['questions'] + 1} of {session['total']}.")
+    tier_note = {
+        "easy": "This fits the budget comfortably.",
+        "close": "This uses more than half of what's left this month. Make them argue for it and press on "
+                 "weak reasons. A release only stands if they hold eye contact through every answer.",
+        "over": "This is MORE than the whole remaining budget. Make them argue hard. Only a proven necessity "
+                "that can't wait earns a release; a good argument for a want earns a timer; otherwise escalate.",
+    }[session["tier"]]
+    if not session["verified"]:
+        eyes = "Eye contact can't be checked right now."
+    elif session["strikes"]:
+        eyes = "They looked away mid-answer once and had to redo it."
+    else:
+        eyes = "They've held eye contact through every answer so far."
     prompt = (
         f"Purchase: {session['item']} for ${session['price']} (category: {session['category']}).\n"
-        f"Monthly budget ${budget['monthly_budget']}, ${remaining:.0f} left. Recent purchases: {recent}.\n"
+        f"Monthly budget ${profile['monthly_budget']}, ${remaining:.0f} left. Recent purchases: {recent}.\n"
+        + (f"{history}\n" if history else "") +
+        f"{tier_note}\n{eyes}\n"
         f"Conversation so far:\n{transcript}\n\n{turn}"
     )
     default = DEFAULT_VERDICT if final else DEFAULT_QUESTION
     try:
         if LLM_PROVIDER == "mock":
-            text = ask_mock(final)
+            text = ask_mock(final, session["questions"])
         elif LLM_PROVIDER == "claude":
             use_advisor = USE_ADVISOR and final  # advisor only for the verdict, to keep questions fast
             try:
@@ -324,7 +541,8 @@ async def ask_llm(session: dict, final: bool) -> dict:
                 log("Advisor call failed, retrying without it:", e)
                 text = await ask_claude(prompt, False)
         else:
-            text = await ask_gemini(prompt)
+            image = vision.jpeg() if SEND_FRAMES and vision.state["present"] else None
+            text = await ask_gemini(prompt, image)
     except Exception as e:
         log(f"LLM error ({LLM_PROVIDER}):", repr(e))
         text = ""
@@ -357,19 +575,21 @@ REVIEW_SCHEMA = {
 
 def spending_stats() -> dict:
     """Numbers are computed here, not by the LLM, so they're always right."""
-    budget = load_budget()
+    profile = store.load()
     by_category = {}
-    for p in budget["purchases"]:
+    for p in profile["purchases"]:
         by_category[p["category"]] = by_category.get(p["category"], 0) + p["price"]
     decisions = []
     if DECISIONS_FILE.exists():
         decisions = [json.loads(l) for l in DECISIONS_FILE.read_text().splitlines() if l.strip()]
     return {
-        "monthly_budget": budget["monthly_budget"],
-        "spent": budget["monthly_budget"] - remaining_budget(budget),
-        "remaining": remaining_budget(budget),
+        "monthly_budget": profile["monthly_budget"],
+        "spent": store.spent(profile),
+        "remaining": store.remaining(profile),
         "by_category": dict(sorted(by_category.items(), key=lambda kv: -kv[1])),
-        "purchases": budget["purchases"],
+        "purchases": profile["purchases"],
+        "goals": profile["goals"],
+        "saved_by_letting_go": store.saved_by_letting_go(profile),
         "checkouts_completed": sum(d.get("outcome") == "completed" for d in decisions),
         "checkouts_abandoned": sum(d.get("outcome") == "abandoned" for d in decisions),
         "recent_decisions": decisions[-10:],
@@ -396,8 +616,8 @@ async def budget_review() -> dict:
 # ---------------------------------------------------------------- server
 
 app = FastAPI()
-# The extension and fake store page call /review from the browser.
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+# The bot, the fake store page, and the dashboard call these from the browser.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/review")
@@ -427,8 +647,176 @@ async def review(speak_it: bool = False):
 
 @app.get("/health")
 def health():
-    budget = load_budget()
-    return {"ok": True, "llm": LLM_PROVIDER, "esp32": head.connected(), "remaining": remaining_budget(budget)}
+    return {"ok": True, "llm": LLM_PROVIDER, "listening": LISTEN, "esp32": head.connected(),
+            "vision": vision.state["running"], "camera": vision.state["camera"],
+            "store": store.STORE, "remaining": store.remaining(store.load())}
+
+
+# ---------------------------------------------------------------- profile API (dashboard)
+
+class Budget(BaseModel):
+    monthly_budget: float
+
+
+class Goal(BaseModel):
+    name: str
+    target: float
+    deadline: str | None = None
+    saved: float = 0
+
+
+class Amount(BaseModel):
+    amount: float
+
+
+class LetGo(BaseModel):
+    goal_id: str | None = None
+
+
+def change_profile(fn, *args):
+    """Apply a store change and return the dashboard summary; unknown ids are a 404."""
+    try:
+        with store.edit() as p:
+            fn(p, *args)
+    except KeyError as e:
+        raise HTTPException(404, f"not found: {e}")
+    return store.summary(store.load())
+
+
+@app.get("/")
+def dashboard():
+    return FileResponse(HERE / "dashboard.html")
+
+
+@app.get("/profile")
+def profile():
+    return store.summary(store.load())
+
+
+@app.put("/budget")
+def set_budget(body: Budget):
+    if body.monthly_budget <= 0:
+        raise HTTPException(400, "budget must be positive")
+    return change_profile(lambda p: p.update(monthly_budget=body.monthly_budget))
+
+
+@app.post("/goals")
+def add_goal(body: Goal):
+    if not body.name.strip() or body.target <= 0:
+        raise HTTPException(400, "a goal needs a name and a positive target")
+    return change_profile(store.add_goal, body.name.strip(), body.target, body.deadline or None, body.saved)
+
+
+@app.post("/goals/{goal_id}/save")
+def save_toward_goal(goal_id: str, body: Amount):
+    return change_profile(store.save_toward, goal_id, body.amount)
+
+
+@app.delete("/goals/{goal_id}")
+def delete_goal(goal_id: str):
+    return change_profile(store.delete_goal, goal_id)
+
+
+@app.post("/waiting/{waiting_id}/let_go")
+def let_go(waiting_id: str, body: LetGo):
+    return change_profile(store.let_go, waiting_id, body.goal_id)
+
+
+@app.post("/waiting/{waiting_id}/still_want")
+def still_want(waiting_id: str):
+    return change_profile(store.still_want, waiting_id)
+
+
+@app.get("/vision")
+def vision_state():
+    """Live face / eye-contact numbers, for tuning the LOOK_* thresholds."""
+    return vision.state
+
+
+@app.get("/vision.jpg")
+def vision_frame():
+    """Latest camera frame with the face marker drawn on (green = looking). Not saved anywhere."""
+    jpg = vision.jpeg(width=640, overlay=True)
+    return Response(jpg, media_type="image/jpeg") if jpg else Response(status_code=503)
+
+
+@app.on_event("startup")
+async def warm_up():
+    if LISTEN:
+        # Load (and on first run download) the Whisper model now, not on the first answer.
+        asyncio.create_task(asyncio.to_thread(whisper_model))
+    if VISION:
+        vision.start()
+        asyncio.create_task(track_user())
+
+
+def eye_contact_available() -> bool:
+    return VISION and vision.state["running"]
+
+
+async def track_user():
+    """10x a second: point the pupils at the user and turn the head to keep their face centered.
+
+    The camera is in the head, so centering the face in the frame means the pig is facing them."""
+    absent_since = time.time()
+    while True:
+        await asyncio.sleep(0.1)
+        s = vision.state
+        if not s["running"]:
+            continue
+        now = time.time()
+        if s["present"]:
+            ex, ey = s["face_x"] - 0.5, s["face_y"] - 0.5  # face offset from image center, -0.5..0.5
+            gaze = [round(ex * 2 * (-1 if GAZE_INVERT_X else 1), 2), round(ey * 2, 2)]
+            if max(abs(a - b) for a, b in zip(gaze, tracking["gaze"])) > 0.05:
+                tracking["gaze"] = gaze
+                await asyncio.to_thread(head.send, {"gaze": gaze}, True)
+            if now > tracking["paused_until"] and not tracking["recording"]:
+                look = list(tracking["look"])
+                if abs(ex) > 0.06:
+                    look[0] += TRACK_GAIN * ex * (-1 if TRACK_INVERT_PAN else 1)
+                if abs(ey) > 0.06:
+                    look[1] += TRACK_GAIN * ey * (-1 if TRACK_INVERT_TILT else 1)
+                look = [round(min(max(v, -1.0), 1.0), 3) for v in look]
+                if look != tracking["look"]:
+                    tracking["look"] = look
+                    await asyncio.to_thread(head.send, {"look": look}, True)
+            # Someone sat down after nobody was there: wake up.
+            if absent_since and now - absent_since > 5 and not tracking["session"]:
+                log("Face appeared, waking up")
+                await head.expr("alert")
+                await asyncio.sleep(1.2)
+                await head.expr("idle")
+            absent_since = None
+        elif absent_since is None:
+            absent_since = now
+            tracking["gaze"] = [0.0, 0.0]
+            await asyncio.to_thread(head.send, {"gaze": [0.0, 0.0]}, True)
+
+
+async def wait_for_eye_contact(seconds: float) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if vision.state["looking"]:
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def stare_to_confirm() -> bool:
+    """User holds eye contact for CONFIRM_SECONDS; the OLED lids close as progress. Looking away resets."""
+    await done_speaking()
+    start = time.time()
+    deadline = start + CONFIRM_WAIT
+    while time.time() < deadline:
+        # Only eye contact held after the prompt counts.
+        held = min(vision.state["looking_for"], time.time() - start)
+        progress = min(held / CONFIRM_SECONDS, 1.0)
+        await asyncio.to_thread(head.send, {"stare": round(progress, 2)}, True)
+        if progress >= 1.0:
+            return True
+        await asyncio.sleep(0.1)
+    return False
 
 
 async def say_and_show(ws: WebSocket, reply: dict, msg: dict):
@@ -438,23 +826,42 @@ async def say_and_show(ws: WebSocket, reply: dict, msg: dict):
 
 
 async def next_turn(ws: WebSocket, session: dict):
-    final = session["questions"] >= QUESTIONS_PER_PURCHASE
+    final = session["questions"] >= session["total"] or session["failed"]
     await head.expr("thinking")
+    t0 = time.time()
     reply = await ask_llm(session, final)
+    log(f"Timing: AI replied in {time.time() - t0:.1f}s")
 
     if not final:
         session["questions"] += 1
         session["transcript"].append(("Piggyback", reply["line"]))
         await say_and_show(ws, reply, {"type": "question", "line": reply["line"], "expression": reply["expression"]})
+        if LISTEN:
+            asyncio.create_task(listen_for_answer(ws, session, session["questions"]))
         return
 
-    remaining = remaining_budget(load_budget())
-    verdict, rule = apply_rules(reply["verdict"], session["price"], remaining)
+    remaining = store.remaining(store.load())
+    clean = session["verified"] and session["answered_all"] and not session["failed"]
+    verdict, rule = apply_rules(reply["verdict"], session["price"], remaining, clean, session["failed"],
+                                reply.get("need") == "need")
     if rule and verdict != reply["verdict"]:
         # The LLM's line would contradict the stricter verdict, so use the rule's line.
         _, reply["expression"], reply["line"] = RULE_LINES[rule]
-    log(f"Verdict: {verdict} (LLM said {reply['verdict']}, rule {rule})")
+    if verdict == "release" and eye_contact_available() and vision.state["present"]:
+        # Earn the release: look Piggyback in the eyes for a few seconds.
+        prompt_line = f"Look me in the eyes for {CONFIRM_SECONDS:.0f} seconds if you're sure."
+        await ws.send_json({"type": "confirm", "seconds": CONFIRM_SECONDS, "line": prompt_line})
+        await speak(prompt_line)
+        if not await stare_to_confirm():
+            verdict, rule = "timer", "no_eye_contact"
+            _, reply["expression"], reply["line"] = RULE_LINES[rule]
+    log(f"Verdict: {verdict} (LLM said {reply['verdict']}, need={reply.get('need')}, rule {rule})")
+    said = [text for who, text in session["transcript"] if who == "User" and not text.startswith(("(", "["))]
+    with store.edit() as p:
+        store.note_verdict(p, session["item"], session["price"], session["category"], verdict, rule,
+                           reply.get("need", "unclear"), said)
     session["done"] = True
+    session["verdict"] = verdict
     await say_and_show(ws, reply, {
         "type": "verdict", "verdict": verdict,
         "seconds": TIMER_SECONDS if verdict == "timer" else 0,
@@ -462,51 +869,133 @@ async def next_turn(ws: WebSocket, session: dict):
     })
 
 
+async def handle_answer(ws: WebSocket, session: dict, turn: int, text: str, verified: bool = False):
+    """Spoken and typed answers both land here; whichever comes first for a turn wins.
+
+    verified: given out loud with camera-checked eye contact. Typed answers never are."""
+    async with session["lock"]:
+        if session["done"] or session["questions"] != turn or session["answered"] >= turn:
+            return
+        session["answered"] = turn
+        if not verified:
+            session["verified"] = False
+        if not text or text == "(no answer)":
+            session["answered_all"] = False
+        session["transcript"].append(("User", text))
+        await next_turn(ws, session)
+
+
+async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
+    try:
+        await done_speaking()  # don't record Piggyback's own voice
+        if session["done"] or session["answered"] >= turn:
+            return
+        verified = eye_contact_available() and vision.state["present"]
+        while True:
+            gate = lambda: True
+            t_wait = time.time()
+            if verified:
+                # The whole answer has to be said looking Piggyback in the eyes.
+                if not await wait_for_eye_contact(3):
+                    await head.expr("suspicious")
+                    await speak("Look me in the eyes and tell me.")
+                    await done_speaking()
+                    await wait_for_eye_contact(6)
+                gate = lambda: vision.state["looking"]
+            if session["done"] or session["answered"] >= turn:
+                return
+            if verified:
+                log(f"Timing: waited {time.time() - t_wait:.1f}s for eye contact")
+            text, broke = await asyncio.to_thread(listen, gate)
+            log("Heard:", repr(text), "(looked away)" if broke else "")
+            if not broke:
+                break
+            session["strikes"] += 1
+            await ws.send_json({"type": "looked_away", "strikes": session["strikes"], "heard": text})
+            if session["strikes"] == 1:
+                await head.expr("suspicious")
+                await speak("You looked away. That doesn't count. Look at me and say it again.")
+                await done_speaking()
+                continue
+            # Second strike: the argument is over and the verdict comes now.
+            session["failed"] = True
+            await handle_answer(ws, session, turn, "[looked away mid-answer twice; argument forfeited]")
+            return
+        await ws.send_json({"type": "heard", "text": text})
+        await handle_answer(ws, session, turn, text or "(no answer)", verified=verified)
+    except Exception as e:
+        log("Listening failed, waiting for a typed answer instead:", repr(e))
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
-    log("Extension connected")
+    log("Bot connected")
     session = None
     try:
         while True:
             msg = await ws.receive_json()
             kind = msg.get("type")
-            log("Extension >", msg)
+            log("Bot >", msg)
 
             if kind == "checkout":
-                session = {
+                if session:
+                    session["done"] = True  # stop any listener from the previous purchase
+                price = float(msg.get("price", 0))
+                with store.edit() as p:
+                    store.note_checkout(p, str(msg.get("item", "something")), price)
+                    tier = budget_tier(price, store.remaining(p))
+                session = tracking["session"] = {
                     "item": str(msg.get("item", "something")),
-                    "price": float(msg.get("price", 0)),
+                    "price": price,
                     "category": str(msg.get("category", "other")),
-                    "questions": 0, "transcript": [], "done": False,
+                    "tier": tier, "total": QUESTIONS_BY_TIER[tier],
+                    "questions": 0, "answered": 0, "transcript": [], "done": False,
+                    "verdict": None, "lock": asyncio.Lock(),
+                    # eye-contact record for the argument
+                    "strikes": 0, "failed": False, "verified": True, "answered_all": True,
                 }
+                log(f"Budget tier: {tier} ({session['total']} questions)")
                 await head.expr("alert")
                 await asyncio.sleep(0.6)  # let the alert pose land before thinking
-                await next_turn(ws, session)
+                async with session["lock"]:
+                    await next_turn(ws, session)
 
             elif kind == "answer":
+                # Typed answers still work (test_client.py, or if the mic fails).
                 if not session or session["done"]:
                     log("Answer with no open session, ignoring")
                     continue
-                session["transcript"].append(("User", str(msg.get("text", ""))))
-                await next_turn(ws, session)
+                await handle_answer(ws, session, session["questions"], str(msg.get("text", "")))
 
             elif kind == "decision":
                 record = {**msg, "time": datetime.now().isoformat(timespec="seconds")}
+                if session:
+                    record["verdict"] = session["verdict"]
                 with DECISIONS_FILE.open("a") as f:
                     f.write(json.dumps(record) + "\n")
                 if msg.get("outcome") == "completed":
-                    budget = load_budget()
-                    price = msg.get("price", session["price"] if session else 0)
-                    budget["purchases"].append({"item": msg.get("item"), "price": price,
-                                                "category": session["category"] if session else "other",
-                                                "date": str(date.today())})
-                    save_budget(budget)
-                session = None
-                await head.expr("idle")
+                    with store.edit() as p:
+                        store.note_purchase(p, str(msg.get("item") or (session["item"] if session else "something")),
+                                            float(msg.get("price", session["price"] if session else 0)),
+                                            session["category"] if session else "other")
+                bought_anyway = session and msg.get("outcome") == "completed" and session["verdict"] in ("timer", "escalate")
+                if session:
+                    session["done"] = True
+                session = tracking["session"] = None
+                if bought_anyway:
+                    # The bot can't block checkout, so Piggyback at least lets you know.
+                    await done_speaking()  # let the verdict finish first
+                    await head.expr("disappointed")
+                    await speak("You bought it anyway. I'll remember that.")
+                else:
+                    await head.expr("idle")
 
             else:
                 log("Unknown message type:", kind)
     except WebSocketDisconnect:
-        log("Extension disconnected")
+        log("Bot disconnected")
+        if session:
+            session["done"] = True
+        tracking["session"] = None
         await head.expr("idle")
