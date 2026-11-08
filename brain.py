@@ -51,7 +51,7 @@ TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
 LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
 SPEAKER = os.getenv("SPEAKER", "jbl")  # Piggyback's voice: the first audio output whose name contains this
-MIC_DEVICE = os.getenv("MIC_DEVICE", "logitech")  # picked by name so iPhone/AirPods mics can't take over
+MIC_DEVICE = os.getenv("MIC_DEVICE", "macbook")  # the laptop's own mic; picked by name so iPhone/AirPods mics can't take over
 MAX_LISTEN_SECONDS = float(os.getenv("MAX_LISTEN_SECONDS", "8"))
 NO_SPEECH_SECONDS = float(os.getenv("NO_SPEECH_SECONDS", "6"))
 VISION = os.getenv("VISION", "1") == "1"  # webcam in the head: tracking + eye contact
@@ -59,6 +59,10 @@ SEND_FRAMES = os.getenv("SEND_FRAMES", "1") == "1"  # attach a webcam frame to G
 CONFIRM_SECONDS = float(os.getenv("CONFIRM_SECONDS", "3"))  # eye contact needed to confirm a release
 CONFIRM_WAIT = float(os.getenv("CONFIRM_WAIT", "10"))
 TRACK_GAIN = float(os.getenv("TRACK_GAIN", "0.15"))
+# Where the head rests when nobody's buying anything ("look" units, pan,tilt): turned away, minding its own
+# business. Something going in the bag starts a slow turn toward the user; at checkout it's facing them.
+IDLE_LOOK = [float(v) for v in os.getenv("IDLE_LOOK", "0.6,0").split(",")]
+TURN_SECONDS = float(os.getenv("TURN_SECONDS", "1.5"))  # how long a turn toward or away from the user takes
 TRACK_INVERT_PAN = os.getenv("TRACK_INVERT_PAN", "0") == "1"
 TRACK_INVERT_TILT = os.getenv("TRACK_INVERT_TILT", "0") == "1"
 GAZE_INVERT_X = os.getenv("GAZE_INVERT_X", "0") == "1"
@@ -194,7 +198,9 @@ def apply_rules(verdict, price: float, remaining: float, clean: bool = False, fa
 # ---------------------------------------------------------------- ESP32 link
 
 # Shared with the tracking loop: expressions pause head tracking, recording freezes the head.
-tracking = {"paused_until": 0.0, "recording": False, "look": [0.0, 0.0], "gaze": [0.0, 0.0], "session": None}
+tracking = {"paused_until": 0.0, "recording": False, "look": [0.0, 0.0], "gaze": [0.0, 0.0], "session": None,
+            "user_look": [0.0, 0.0],  # head direction that last had the user's face centered
+            "engaged_until": 0.0}     # facing the user until then (or while a checkout session is open)
 
 
 class Head:
@@ -272,8 +278,24 @@ class Head:
                 self.ser = None
 
     async def expr(self, name: str):
-        tracking["paused_until"] = time.time() + 1.3  # let the expression's pose play before tracking resumes
+        # let the expression's pose (or a slow turn still going) play before tracking resumes
+        tracking["paused_until"] = max(tracking["paused_until"], time.time() + 1.3)
         await asyncio.to_thread(self.send, {"expr": name})
+
+
+def engaged() -> bool:
+    return bool(tracking["session"]) or time.time() < tracking["engaged_until"]
+
+
+async def turn_to_user(hold: float = 0):
+    """Start the slow turn toward where the user was last seen; tracking fine-tunes it once the camera
+    (in the head) sees them. The head keeps facing them for `hold` seconds, or while a checkout is open."""
+    tracking["engaged_until"] = max(tracking["engaged_until"], time.time() + hold)
+    if tracking["look"] == tracking["user_look"]:
+        return
+    tracking["look"] = list(tracking["user_look"])
+    tracking["paused_until"] = time.time() + TURN_SECONDS
+    await asyncio.to_thread(head.send, {"look": tracking["look"], "s": TURN_SECONDS})
 
 
 head = Head()
@@ -778,6 +800,7 @@ async def added_to_bag(added: AddedToBag):
     if (session and not session["done"]) or time.time() - _last_remark < 5:
         return {"ok": True, "line": None}  # mid-argument, or a double click
     _last_remark = time.time()
+    await turn_to_user(hold=15)  # starts turning now, while the remark is still being written
     await head.expr("alert")
     remark = await quick_remark(added)
     await head.expr(remark["expression"])
@@ -790,6 +813,8 @@ async def review(speak_it: bool = False):
     stats = spending_stats()
     result = {k: stats[k] for k in ("monthly_budget", "spent", "remaining", "by_category",
                                     "checkouts_completed", "checkouts_abandoned")}
+    if speak_it:
+        await turn_to_user(hold=20)
     await head.expr("thinking")
     try:
         result.update(await budget_review())
@@ -912,7 +937,7 @@ async def warm_up():
         asyncio.create_task(asyncio.to_thread(whisper_model))
     if VISION:
         vision.start()
-        asyncio.create_task(track_user())
+    asyncio.create_task(track_user())  # also turns the head away when idle, camera or not
 
 
 def eye_contact_available() -> bool:
@@ -926,17 +951,24 @@ async def track_user():
     absent_since = time.time()
     while True:
         await asyncio.sleep(0.1)
+        now = time.time()
+        if not engaged() and tracking["look"] != IDLE_LOOK and now > tracking["paused_until"]:
+            # Nobody's buying anything: slowly turn away and mind its own business.
+            tracking["look"] = list(IDLE_LOOK)
+            tracking["paused_until"] = now + TURN_SECONDS
+            await asyncio.to_thread(head.send, {"look": tracking["look"], "s": TURN_SECONDS})  # logged: rare
         s = vision.state
         if not s["running"]:
             continue
-        now = time.time()
         if s["present"]:
             ex, ey = s["face_x"] - 0.5, s["face_y"] - 0.5  # face offset from image center, -0.5..0.5
             gaze = [round(ex * 2 * (-1 if GAZE_INVERT_X else 1), 2), round(ey * 2, 2)]
             if max(abs(a - b) for a, b in zip(gaze, tracking["gaze"])) > 0.05:
                 tracking["gaze"] = gaze
                 await asyncio.to_thread(head.send, {"gaze": gaze}, True)
-            if now > tracking["paused_until"] and not tracking["recording"]:
+            if now > tracking["paused_until"] and not tracking["recording"] and engaged():
+                if abs(ex) < 0.1 and abs(ey) < 0.1:
+                    tracking["user_look"] = list(tracking["look"])  # facing them: remember where they sit
                 look = list(tracking["look"])
                 if abs(ex) > 0.06:
                     look[0] += TRACK_GAIN * ex * (-1 if TRACK_INVERT_PAN else 1)
@@ -1135,6 +1167,7 @@ async def ws_endpoint(ws: WebSocket):
                     "strikes": 0, "failed": False, "verified": True, "answered_all": True,
                 }
                 log(f"Budget tier: {tier} ({session['total']} questions)")
+                await turn_to_user()  # usually already facing them from the add-to-bag remark
                 await head.expr("alert")
                 # Start the AI now so it runs while the alert pose lands (saves ~0.6 s).
                 first = asyncio.create_task(ask_llm(session, final=False))
@@ -1164,6 +1197,7 @@ async def ws_endpoint(ws: WebSocket):
                 if session:
                     session["done"] = True
                 session = tracking["session"] = None
+                tracking["engaged_until"] = time.time() + 8  # keep facing them for the last word, then look away
                 if bought_anyway:
                     # The bot can't block checkout, so Piggyback at least lets you know.
                     await done_speaking()  # let the verdict finish first
