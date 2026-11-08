@@ -9,3 +9,6 @@ models/
 .env
 firmware/**/secrets.h
 *.backup-*
+
+# PlatformIO build output
+.pio/
