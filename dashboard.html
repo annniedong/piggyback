@@ -353,7 +353,7 @@ function render(s) {
     s.goals.map((g) => `<option value="${g.id}">→ ${esc(g.name)}</option>`).join("");
   $("waiting").innerHTML = s.waiting.length ? s.waiting.map((w) => `<div class="row">
       <span><span class="item">${esc(w.item)}</span><span class="price">${money(w.price)}</span><br>
-        <span class="sub">${ago(w.first_wanted)}${w.tries > 1 ? ` · tried ${w.tries}×` : ""}</span></span>
+        <span class="sub">${ago(w.first_wanted)}${w.tries > 1 ? ` · tried ${w.tries}×` : ""}${w.status === "still_want" ? " · kept" : ""}</span></span>
       <span class="actions" style="margin:0">
         <select data-goal-for="${w.id}" aria-label="Where the money goes">${goalOptions}</select>
         <button class="primary" data-letgo="${w.id}">Let go</button>
