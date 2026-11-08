@@ -14,8 +14,9 @@ CAMERA_INDEX = os.getenv("CAMERA_INDEX")  # set a number to skip name matching
 # Wireless camera: a video stream URL (e.g. the Logitech on a Pi running ustreamer,
 # http://pig-cam.local:8080/stream). When set, CAMERA_NAME and CAMERA_INDEX are ignored.
 CAMERA_URL = os.getenv("CAMERA_URL")
-# The webcam only fits on the pig's head on its side: every frame is turned this many degrees
-# counterclockwise (0, 90, 180, 270) before anything reads it, so faces are upright.
+# The webcam only fits on the pig's head on its side: its frames are turned this many degrees
+# counterclockwise (0, 90, 180, 270) before anything reads them, so faces are upright. Only the
+# head's camera (CAMERA_NAME, or the CAMERA_URL stream) is turned; a laptop camera stands in upright.
 CAMERA_ROTATE = int(os.getenv("CAMERA_ROTATE", "0")) % 360
 # Webcam MJPEG often has odd APP segments; FFmpeg then prints "unable to decode APP fields"
 # for every frame even though it decodes fine. -8 = quiet. Must be set before cv2 loads.
@@ -48,12 +49,17 @@ def list_cameras() -> list:
     return [d.localizedName() for d in sorted(devices, key=lambda d: d.uniqueID())]
 
 
-def upright(frame):
-    """The frame turned by CAMERA_ROTATE, so a camera mounted on its side still gives upright faces."""
+def is_head_camera(name: str) -> bool:
+    """The webcam mounted in the pig's head, as opposed to a laptop camera standing in for it."""
+    return CAMERA_NAME.lower() in name.lower()
+
+
+def upright(frame, degrees: int = CAMERA_ROTATE):
+    """The frame turned `degrees` counterclockwise, so a camera mounted on its side still gives upright faces."""
     import cv2
 
     turns = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_CLOCKWISE}
-    return cv2.rotate(frame, turns[CAMERA_ROTATE]) if CAMERA_ROTATE in turns else frame
+    return cv2.rotate(frame, turns[degrees]) if degrees in turns else frame
 
 
 def pick_camera():
@@ -151,6 +157,7 @@ class Vision:
         self._lock = threading.Lock()
         self._score = 0.0
         self._looking_since = None
+        self._rotate = 0  # degrees; set in start() once we know which camera it is
 
     def start(self):
         """Call from the main thread: macOS only shows the camera permission prompt there."""
@@ -159,6 +166,7 @@ class Vision:
 
             if CAMERA_URL:
                 self.state["camera"] = CAMERA_URL
+                self._rotate = CAMERA_ROTATE
                 print(f"Camera: stream {CAMERA_URL}", flush=True)
                 cap = StreamCapture(CAMERA_URL)
                 if not cap.isOpened():
@@ -168,8 +176,10 @@ class Vision:
                 return
             index, name = pick_camera()
             self.state["camera"] = name
+            self._rotate = CAMERA_ROTATE if is_head_camera(name) else 0
             print(f"Camera: {name} (index {index})"
-                  + (f", turned {CAMERA_ROTATE}° counterclockwise" if CAMERA_ROTATE else ""), flush=True)
+                  + (f", turned {self._rotate}° counterclockwise" if self._rotate
+                     else ", not turned (not the head's camera)" if CAMERA_ROTATE else ""), flush=True)
             cap = cv2.VideoCapture(index)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -208,7 +218,7 @@ class Vision:
             if not ok:
                 time.sleep(0.05)
                 continue
-            frame = upright(frame)
+            frame = upright(frame, self._rotate)
             n += 1
             if n % 15 == 0:  # near 0 means black frames (lens covered, wrong camera, or no permission)
                 self.state["brightness"] = round(float(frame.mean()), 1)
