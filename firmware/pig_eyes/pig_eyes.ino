@@ -1,14 +1,16 @@
 /*
-  Pig Interrogator - ESP32 eyes firmware (single OLED, two eyes)
-  ==============================================================
-  Eyes only. Neck tilt/pan and ears are handled separately (teammate's servo code).
+  Pig Interrogator - ESP32 eyes + head firmware (single OLED, two eyes, pan servo)
+  ===============================================================================
+  The head only turns left and right (one pan servo). Expressions are short turns
+  around the direction the pig faces, so nods and droops are left to the eyes.
 
   Hardware:
     OLED (SSD1306 128x64 I2C, 0x3C)  -> Wire : SDA 21, SCL 22
       Both eyes are drawn side by side on this one screen.
     OLED VCC -> ESP32 3.3V, GND -> GND
+    Pan servo (MG90S) signal -> GPIO 18; power from the 5 V bench supply, grounds shared
 
-  Libraries: Adafruit SSD1306, Adafruit GFX
+  Libraries: Adafruit SSD1306, Adafruit GFX, ESP32Servo
   Board: ESP32 Dev Module
 
   Connections (both work at the same time):
@@ -26,15 +28,21 @@
     BLINK                one blink
     CENTER               pupils back to center, idle eyes
     IDLE <on|off>        idle pupil glances after a few quiet seconds
+    MOVE <expr>          play a brain expression's head turns (idle alert suspicious ...), eyes unchanged
+    PAN <deg>            face this servo angle (PAN_MIN..PAN_MAX); expressions turn around it
     STATUS               print current state
     HELP                 list commands
   Every reply starts with OK, ERR, PONG, or READY.
 
   Brain commands (piggyback/brain.py, one JSON object per line, same ports):
     {"expr": "suspicious"}  idle alert suspicious skeptical satisfied disappointed thinking
-                            -> eyes (plus a short pupil glance for some); holds until the next expr.
-                            Unknown names fall back to idle and reply {"err":"unknown expr"}.
-    {"look": [pan, tilt]}   accepted and ignored here (the head servos are separate); replies ok
+                            -> eyes (plus a short pupil glance for some) and head turns; eyes hold
+                            until the next expr. Unknown names fall back to idle and reply {"err":"unknown expr"}.
+    {"look": [pan, tilt], "s": 1.5}
+                            -1..1, where the pig faces; tilt is ignored. Optional s = seconds the turn
+                            takes (default 0.3). During a one-shot expression it waits until that ends.
+    {"hold": 1} / {"hold": 0}
+                            while the brain records an answer: stop any turns, face the user, stay still
     {"gaze": [x, y]}        -1..1 pupils (no reply)
     {"stare": p}            0..1 stare-down eyes, lids close as p grows, no blinking;
                             any expr ends it (no reply)
@@ -49,6 +57,7 @@
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <ESP32Servo.h>
 
 // ======================= CONFIG =======================
 
@@ -90,6 +99,15 @@
 #define BRAIN_QUIET_MS 30000  // idle behavior comes back after this long with no brain commands
 #define GLANCE_MS      1200   // expression pupil glances last this long
 
+// Head: one pan servo (left and right only). Calibrate the limits once the head is mounted.
+#define PAN_PIN    18
+#define PAN_MIN    45     // servo degrees; narrow these if the head hits the frame
+#define PAN_MAX    135
+#define PAN_HOME   90     // straight ahead; "look" [0, 0]
+#define TILT_PIN   -1     // set to 19 to hold a mounted tilt servo still at TILT_HOME; -1 = not driven
+#define TILT_HOME  90
+#define MAX_DEG_PER_SEC 100.0f  // servo top speed with the head on; faster turns just take longer
+
 #define SCREEN_W 128
 #define SCREEN_H 64
 
@@ -105,6 +123,13 @@
 // browTilt: + inner end lower (angry), - inner end higher (worried)
 struct EyeP { float lid, tilt, low, pupil, browY, browTilt; };
 struct Expr { const char* name; EyeP l, r; };
+
+// Head turns: each step turns to dPan degrees from the facing direction over ms milliseconds
+// (a step to the same offset as the one before is a hold). Pan offsets are mirrored when the
+// pig faces right of center, so turns go toward the middle instead of into a limit.
+struct Step { int8_t dPan; uint16_t ms; };
+struct Move { const Step* steps; uint8_t n; bool loops; };
+#define MOVE(a, loops) {a, sizeof(a) / sizeof(a[0]), loops}
 
 // ======================= GLOBALS =======================
 
@@ -125,20 +150,31 @@ const int NUM_EXPRS = sizeof(EXPRS) / sizeof(EXPRS[0]);
 // Stare-down eyes for {"stare": p}; the upper lid is set from p each frame.
 const EyeP STARE_EYE = {0.10, 0.5, 0.15, 7, 12, 0.5};
 
-// The brain's expression names -> eyes (from EXPRS) and a pupil glance.
+// Every one-shot move ends facing the same way it started. Keep EXPR_SECONDS in brain.py in step with
+// these lengths (it pauses face tracking while a move plays).
+const Step IDLE_STEPS[]  = {{0, 400}};                                            // face forward, hold still
+const Step ALERT_STEPS[] = {{-8, 200}, {0, 250}};                                 // double take
+const Step SUSP_STEPS[]  = {{8, 800}, {8, 1200}, {0, 500}};                       // side-eye, then back
+const Step SKEPT_STEPS[] = {{25, 700}, {25, 500}, {0, 400}, {0, 400}};            // look away, glance back
+const Step SATIS_STEPS[] = {{6, 150}, {-6, 200}, {6, 200}, {-6, 200}, {0, 150}};  // happy wiggle
+const Step DISAP_STEPS[] = {{-12, 700}, {12, 900}, {-8, 1000}, {5, 1000}, {0, 800}};  // slow "no", slowing down
+const Step THINK_STEPS[] = {{15, 1000}, {10, 1500}, {18, 1500}};                  // glance aside, sway (loops)
+
+// The brain's expression names -> eyes (from EXPRS), a pupil glance, and head turns.
 struct BrainExpr {
   const char* name;
   const char* eyes;
   float glanceX, glanceY; // pupil glance held for GLANCE_MS (0,0 = none)
+  Move move;
 };
 const BrainExpr BRAIN_EXPRS[] = {
-  {"idle",         "idle",        0,    0},
-  {"alert",        "shocked",     0,    0},
-  {"suspicious",   "suspicious",  0,    0},
-  {"skeptical",    "skeptical",   0,    0},
-  {"satisfied",    "happy",       0,    0},
-  {"disappointed", "sad",         0,    0.3},
-  {"thinking",     "thinking",   -0.6, -0.7},
+  {"idle",         "idle",        0,    0,   MOVE(IDLE_STEPS, false)},
+  {"alert",        "shocked",     0,    0,   MOVE(ALERT_STEPS, false)},
+  {"suspicious",   "suspicious",  0,    0,   MOVE(SUSP_STEPS, false)},
+  {"skeptical",    "skeptical",   0,    0,   MOVE(SKEPT_STEPS, false)},
+  {"satisfied",    "happy",       0,    0,   MOVE(SATIS_STEPS, false)},
+  {"disappointed", "sad",         0,    0.3, MOVE(DISAP_STEPS, false)},
+  {"thinking",     "thinking",   -0.6, -0.7, MOVE(THINK_STEPS, true)},
 };
 const int NUM_BRAIN_EXPRS = sizeof(BRAIN_EXPRS) / sizeof(BRAIN_EXPRS[0]);
 
@@ -167,6 +203,20 @@ uint32_t lastBrainMs = 0;        // last JSON command (0 = never)
 bool     staring = false;
 float    stareP = 0;
 uint32_t glanceUntilMs = 0;      // incoming gaze is ignored until here
+
+// Head state
+Servo    panServo, tiltServo;
+float    panCur = PAN_HOME, panFrom = PAN_HOME, panTo = PAN_HOME;
+uint32_t panStartMs = 0, panMs = 0;
+int      panWritten = -1;
+int      facePan = PAN_HOME;         // where the pig faces: the last "look" (the user, or its resting spot)
+const Move* curMove = NULL;          // expression turns being played (NULL = none)
+uint8_t  moveI = 0;
+int8_t   moveDir = 1;                // -1 mirrors the turns toward the middle
+bool     lookPending = false;        // a "look" during a one-shot move or a hold waits until it ends
+int      pendingPan = PAN_HOME;
+uint32_t pendingMs = 0;
+bool     holding = false;            // the brain is recording an answer: no head motion
 
 // Command input buffers (one per source) and where replies go
 #define LINE_MAX 96
@@ -354,7 +404,91 @@ void updateIdle(uint32_t now) {
   }
 }
 
+// ======================= HEAD =======================
+
+// Starts a smoothstep turn from wherever the head is now, so a new command interrupts cleanly.
+void turnTo(int pan, uint32_t ms) {
+  panFrom = panCur;
+  panTo = clampf(pan, PAN_MIN, PAN_MAX);
+  // Smoothstep peaks at 1.5x the average speed, so stretch the turn until that peak fits the servo.
+  uint32_t minMs = (uint32_t)(1.5f * fabsf(panTo - panFrom) / MAX_DEG_PER_SEC * 1000);
+  panMs = ms > minMs ? ms : minMs;
+  panStartMs = millis();
+}
+
+uint32_t turnMsLeft(uint32_t now) {
+  int32_t gone = (int32_t)(now - panStartMs);
+  if (gone < 0) gone = 0;
+  return (uint32_t)gone < panMs ? panMs - gone : 0;
+}
+
+void startStep(uint32_t minMs) {
+  const Step &s = curMove->steps[moveI];
+  turnTo(facePan + moveDir * s.dPan, s.ms > minMs ? s.ms : minMs);
+}
+
+void followPendingLook() {
+  lookPending = false;
+  facePan = pendingPan;
+  turnTo(facePan, pendingMs);
+}
+
+void playMove(const Move &m, uint32_t now) {
+  if (lookPending) { lookPending = false; facePan = pendingPan; }   // turn around the newest position
+  curMove = &m;
+  moveI = 0;
+  moveDir = facePan > PAN_HOME ? -1 : 1;
+  startStep(turnMsLeft(now));   // never speed up a slow turn that's still going
+}
+
+void applyLook(float x, uint32_t ms) {
+  x = clampf(x, -1, 1);
+  int pan = PAN_HOME + (int)(x * (x >= 0 ? PAN_MAX - PAN_HOME : PAN_HOME - PAN_MIN));
+  if (holding || (curMove && !curMove->loops)) {   // let the move (or the answer) finish, then follow
+    lookPending = true;
+    pendingPan = pan;
+    pendingMs = ms;
+    return;
+  }
+  curMove = NULL;   // a look ends the thinking sway
+  facePan = pan;
+  turnTo(pan, ms);
+}
+
+void setHold(bool on) {
+  holding = on;
+  if (on) {
+    curMove = NULL;           // stop any move and face the user, then stay still
+    turnTo(facePan, 300);
+  } else if (lookPending) {
+    followPendingLook();
+  }
+}
+
+void updateHead(uint32_t now) {
+  int32_t gone = (int32_t)(now - panStartMs);
+  float t = panMs ? (float)(gone > 0 ? gone : 0) / panMs : 1.0f;
+  if (t > 1) t = 1;
+  float s = t * t * (3 - 2 * t);
+  panCur = panFrom + (panTo - panFrom) * s;
+  int deg = (int)lroundf(panCur);
+  if (deg != panWritten) { panServo.write(deg); panWritten = deg; }
+
+  if (t < 1 || !curMove) return;
+  if (++moveI < curMove->n) { startStep(0); return; }
+  if (curMove->loops) { moveI = 0; startStep(0); return; }
+  curMove = NULL;
+  if (lookPending && !holding) followPendingLook();   // tracking wanted to move during the move: catch up
+}
+
 // ======================= COMMANDS =======================
+
+int findBrainExpr(const char* name) {
+  for (int i = 0; i < NUM_BRAIN_EXPRS; i++) {
+    if (!strcasecmp(name, BRAIN_EXPRS[i].name)) return i;
+  }
+  return -1;
+}
 
 int findExpr(const char* name) {
   for (int i = 0; i < NUM_EXPRS; i++) {
@@ -365,7 +499,7 @@ int findExpr(const char* name) {
 
 void printHelp() {
   out->println("OK commands: PING | GAZE <x> <y> | EYES <expr> [ms] | BLINK | CENTER |");
-  out->println("OK   IDLE <on|off> | STATUS | HELP");
+  out->println("OK   IDLE <on|off> | MOVE <expr> | PAN <deg> | STATUS | HELP");
   out->print("OK expressions:");
   for (int i = 0; i < NUM_EXPRS; i++) { out->print(' '); out->print(EXPRS[i].name); }
   out->println();
@@ -414,9 +548,27 @@ void handleCommand(char* line) {
     idleOn = !strcasecmp(a1, "on");
     out->printf("OK IDLE %s\n", idleOn ? "on" : "off");
 
+  } else if (!strcasecmp(cmd, "MOVE")) {
+    int b = a1 ? findBrainExpr(a1) : -1;
+    if (b < 0) { out->println("ERR usage: MOVE <idle|alert|suspicious|skeptical|satisfied|disappointed|thinking>"); return; }
+    holding = false;
+    playMove(BRAIN_EXPRS[b].move, now);
+    out->printf("OK MOVE %s\n", BRAIN_EXPRS[b].name);
+
+  } else if (!strcasecmp(cmd, "PAN")) {
+    if (!a1) { out->printf("ERR usage: PAN <deg> (%d..%d)\n", PAN_MIN, PAN_MAX); return; }
+    holding = false;
+    lookPending = false;
+    curMove = NULL;
+    facePan = (int)clampf(atof(a1), PAN_MIN, PAN_MAX);
+    turnTo(facePan, 500);
+    out->printf("OK PAN %d\n", facePan);
+
   } else if (!strcasecmp(cmd, "STATUS")) {
     out->printf("OK STATUS eyes=%s gaze=%.2f,%.2f staring=%d idle=%d oled=%d\n",
                 EXPRS[exprIdx].name, gazeTX, gazeTY, staring, idleOn, oledOk);
+    out->printf("OK HEAD pan=%d facing=%d moving=%d holding=%d\n",
+                panWritten, facePan, curMove != NULL, holding);
     out->printf("OK WIFI %s ip=%s client=%d\n",
                 WiFi.status() == WL_CONNECTED ? "connected" : (wifiEnabled ? "connecting" : "off"),
                 WiFi.localIP().toString().c_str(), (int)(client && client.connected()));
@@ -468,12 +620,11 @@ static bool readPair(const char* p, float &a, float &b) {
 }
 
 void brainExpr(const char* name, uint32_t now) {
-  int b = 0;   // unknown names fall back to idle
-  bool known = false;
-  for (int i = 0; i < NUM_BRAIN_EXPRS; i++) {
-    if (!strcasecmp(name, BRAIN_EXPRS[i].name)) { b = i; known = true; break; }
-  }
+  int b = findBrainExpr(name);
+  bool known = b >= 0;
+  if (!known) b = 0;   // unknown names fall back to idle
   const BrainExpr &e = BRAIN_EXPRS[b];
+  if (!holding) playMove(e.move, now);   // while an answer is recorded, only the eyes change
 
   int idx = findExpr(e.eyes);
   exprIdx = idx < 0 ? 0 : idx;
@@ -510,7 +661,17 @@ void handleJson(const char* line) {
     if (!readStr(p, name, sizeof(name))) { out->println("{\"err\":\"bad expr\"}"); return; }
     brainExpr(name, now);
 
-  } else if (!strcmp(key, "look")) {          // head servos live in separate firmware
+  } else if (!strcmp(key, "look")) {          // [pan, tilt], optional "s"; tilt is ignored (pan-only head)
+    if (!readPair(p, a, b)) { out->println("{\"err\":\"bad look\"}"); return; }
+    float secs = 0.3f;
+    const char* sp = strstr(p, "\"s\"");
+    if (sp && (sp = strchr(sp, ':'))) readNum(sp + 1, secs);
+    applyLook(a, (uint32_t)(clampf(secs, 0, 10) * 1000));
+    out->println("{\"ok\":true}");
+
+  } else if (!strcmp(key, "hold")) {          // 1/true while the brain records an answer
+    p = skipWs(p);
+    setHold(!strncmp(p, "true", 4) || (readNum(p, a) && a != 0));
     out->println("{\"ok\":true}");
 
   } else if (!strcmp(key, "gaze")) {          // sent ~10x/s, no reply
@@ -604,6 +765,16 @@ void setup() {
   // periphBegin = false: the bus is already started on the right pins
   oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false);
 
+  panServo.setPeriodHertz(50);
+  panServo.attach(PAN_PIN, 500, 2400);
+  panServo.write(PAN_HOME);
+  panWritten = PAN_HOME;
+  if (TILT_PIN >= 0) {
+    tiltServo.setPeriodHertz(50);
+    tiltServo.attach(TILT_PIN, 500, 2400);
+    tiltServo.write(TILT_HOME);
+  }
+
   uint32_t now = millis();
   lastCmdMs    = now;
   nextBlinkMs  = now + 1500;
@@ -630,11 +801,12 @@ void loop() {
   pollSerial();
   pollNetwork();
 
-  // Glances and idle at ~50 Hz
+  // Glances, idle, and head at ~50 Hz (the servo's own update rate)
   if (now - lastTickMs >= 20) {
     lastTickMs = now;
     updateGlance(now);
     updateIdle(now);
+    updateHead(millis());   // millis(), not now: a command read above may have just started a turn
   }
 
   // Eyes at up to ~30 fps, only redrawn when something changes
