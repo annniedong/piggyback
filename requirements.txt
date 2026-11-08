@@ -1,0 +1,21 @@
+# Brain server (brain.py)
+fastapi
+uvicorn
+pydantic>=2
+pyserial
+google-genai
+anthropic
+websockets
+
+# Spoken answers (faster-whisper on the mic)
+faster-whisper
+sounddevice
+numpy
+
+# Webcam eye contact (vision.py); pyobjc lists cameras by name on macOS
+mediapipe
+opencv-python
+pyobjc-framework-AVFoundation; sys_platform == "darwin"
+
+# Browser bot (bot/); also run: python -m playwright install chromium
+-r bot/requirements.txt

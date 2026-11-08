@@ -2,7 +2,7 @@
 
 A robot piggy bank that judges your online purchases. Built for MakeCU 2026 (Columbia's hardware hackathon, Nov 7–8), Creativity track.
 
-When you reach checkout on a shopping site, a bot reading the page spots it and tells Piggyback what you're buying. Piggyback turns its head toward you, changes its eyes, and asks two short questions out loud. You have to look it in the (OLED) eyes to answer: a webcam in its head knows when you're making eye contact, and its eyes and head follow you. Then it gives a verdict: go ahead (only after you hold its stare for 3 seconds), take a cooling-off timer, or it escalates to an accountability buddy. The bot only watches, so verdicts are advice, but if you buy anyway Piggyback notices and says so. Catchphrase: "Put it back."
+When you click "Place order" on a shopping site, the Piggyback Chrome extension pauses checkout and tells Piggyback what you're buying. Piggyback turns its head toward you, changes its eyes, and asks two or three short questions out loud. You have to look it in the (OLED) eyes to answer: a webcam in its head knows when you're making eye contact, and its eyes and head follow you. Then it gives a verdict: go ahead (only after you hold its stare for 3 seconds), take a cooling-off timer, or it escalates to an accountability buddy. The extension holds the order until the verdict; you can still buy anyway, and Piggyback notices and says so. Catchphrase: "Put it back."
 
 Pitch idea: digital money is invisible, so Piggyback gives your spending a physical, expressive presence. You can argue with it, but only to its face: holding eye contact through a real argument can save a close call, and only a proven necessity gets an over-budget purchase through.
 
@@ -13,16 +13,19 @@ Pitch idea: digital money is invisible, so Piggyback gives your spending a physi
 ## Architecture
 
 ```
-Page-reading bot ──WebSocket──► brain.py (laptop, FastAPI :8000)
-                                   │  Gemini Flash: checkout questions + verdicts
-                                   │  Claude: on-demand budget review (GET /review)
-                                   │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
-                                   │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
-                                   └──USB serial (JSON lines)──► ESP32 firmware
-                                                                   ├─PWM──► 2× neck servos (pan/tilt)
-                                                                   ├─I2C bus 0─► left SSD1306 OLED eye
-                                                                   └─I2C bus 1─► right SSD1306 OLED eye
+Chrome extension ──WebSocket /ws────► brain.py (laptop, one FastAPI app :8000)
+bot/browser.py ───HTTP POST /alert──►    │  Gemini Flash (Vertex, piggyback-brain): checkout questions + verdicts
+extension ────────POST /sale, /cart──►   │  sales.py: page reading (Gemini flash-lite, Alisha's key)
+                                               │  speaks via macOS `say`, hears answers on the webcam mic (faster-whisper)
+                                         │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
+                                         │  store.py + dashboard.html: profile, goals, waiting room (GET /)
+                                         └──USB serial (JSON lines)──► ESP32 firmware
+                                                                         ├─PWM──► 2× neck servos (pan/tilt)
+                                                                         ├─I2C bus 0─► left SSD1306 OLED eye
+                                                                         └─I2C bus 1─► right SSD1306 OLED eye
 ```
+
+All HTTP/WebSocket endpoints (`/ws`, `/alert`, `/review`, `/health`, plus the `/store` demo page) live on the single `app` in `brain.py`. Don't start a second server: only one process can hold the ESP32's serial port, and every endpoint needs it.
 
 No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no Wi-Fi or network setup. The ESP32 has two hardware I2C buses, so both OLEDs can keep the default 0x3C address.
 
@@ -33,34 +36,57 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 - `vision.py` (laptop): reads the webcam in the pig's head; tracks the face and whether the user is looking at the eyes. Downloads `models/face_landmarker.task` on first run.
 - `store.py` (laptop, or Cloud Run later): the user's profile: budget, purchases, savings goals, the waiting room, and past arguments. `STORE=json` keeps it in `profile.json` (migrated automatically from the old `budget.json`); `STORE=firestore` keeps it in Firestore document `profiles/<PROFILE_ID>` (needs `pip install google-cloud-firestore`; not tested yet). Same functions either way.
 - `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget. Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
-- `check_devices.py` (laptop): checks the camera and mic before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
-- `test_client.py` (laptop): pretends to be the bot for testing the brain (answers are typed).
+- `check_devices.py` (laptop): checks the camera, mic, speaker, and Gemini before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
+- `test_client.py` (laptop): pretends to be the extension for testing the brain (`--auto` canned answers, `--voice` answer out loud; `BRAIN_URL` for another port).
+- `extension/` (Chrome, Manifest V3): holds "Place order" on the demo store and runs the checkout conversation (`content.js`), Budget review popup (`popup.html`), browsing alerts to `/alert` (`background.js`). Load unpacked; see `extension/README.md`.
+- `store/` (served by the brain at http://localhost:8000/store/): fake demo store; its Place order button carries `data-piggyback="place-order"` with `data-item`, `data-price`, `data-category`.
+- `sales.py` (laptop): `POST /sale`, AI check for sales/coupons/promo codes on a shopping page, and `POST /cart`, AI reading of item count + subtotal from any store's cart page or cart drawer. Uses only `GEMINI_API_KEY_WEB`; local checks without it. Loaded into `brain.py` with `include_router`; also loads the git-ignored `.env`.
+- `bot/` (laptop, optional): Playwright browser that watches Amazon/Target/Walmart tabs and posts browsing alerts to `/alert`. Separate process; see `bot/README.md`. Tests: `python -m unittest bot.test_detector`.
 
 ## Message formats
 
-Bot → brain (WebSocket `ws://localhost:8000/ws`):
+Extension → brain (WebSocket `ws://localhost:8000/ws`):
 
 ```json
-{"type": "checkout", "item": "Smart toaster", "price": 400, "category": "kitchen"}
+{"type": "checkout", "item": "Smart toaster", "price": 400, "category": "kitchen", "url": "https://..."}
 {"type": "decision", "item": "Smart toaster", "outcome": "completed" | "abandoned", "seconds_on_page": 42}
 {"type": "answer", "text": "I need it for work"}
 ```
 
-- `checkout`: send when the bot sees a checkout page. `price` is a number in dollars.
-- `decision`: `completed` when the bot sees the order confirmation page, `abandoned` when the user leaves checkout without buying.
-- `answer`: optional. Spoken answers are heard by the brain itself; typed answers are for testing or if the mic fails.
+- `checkout`: sent when the user clicks Place order (or similar). `price` is a number in dollars. `url` (optional) is the checkout page, used to match what the extension noticed on that site.
+- `decision`: `completed` when the user goes ahead with the order, `abandoned` when they put it back.
+- `answer`: optional. Spoken answers are heard by the brain itself; typed answers are for testing or if the mic fails. The overlay hides its text box behind a "Can't talk? Type instead" link, since typed answers never count as eye contact.
 
-Brain → bot (the bot can ignore these, or show them):
+Add to bag (HTTP `POST http://localhost:8000/added`, from `background.js` when an "Add to cart/bag" button is clicked):
+
+```json
+{"website": "https://...", "item": "Wool Twill Pants", "price": 1200}
+```
+
+The item goes in the bag right away; Piggyback turns to `alert` and says one quick line out loud (Gemini on `GEMINI_FALLBACK_MODEL`, about 2 s, canned line after 2.5 s), like "Twelve-hundred bucks for pants? We'll chat at checkout." The argument still waits for checkout, where the AI is told what went in the bag. Skipped during an argument and within 5 s of the last remark.
+
+Brain → extension (the overlay, a small card in the bottom-right corner, shows all of these):
 
 ```json
 {"type": "question", "line": "...", "expression": "suspicious"}
+{"type": "listening", "seconds": 6}
+{"type": "nudge", "line": "Take your time. I'm listening."}
 {"type": "heard", "text": "I need it for my cooking class"}
 {"type": "confirm", "seconds": 3, "line": "Look me in the eyes for 3 seconds if you're sure."}
 {"type": "looked_away", "strikes": 1, "heard": "For my"}
 {"type": "verdict", "verdict": "release" | "timer" | "escalate", "seconds": 60, "line": "...", "rule": null}
 ```
 
-Budget review (HTTP, `GET http://localhost:8000/review` from the bot or `curl`; how it's triggered in the demo is still open; add `?speak_it=true` to have Piggyback say the summary out loud):
+Browser bot → brain (HTTP `POST http://localhost:8000/alert`, returns `{"ok": true}`):
+
+```json
+{"type": "shopping_visit" | "ad_referral" | "sponsored" | "retargeted" | "upsell" | "cart" | "over_budget" | "cart_count" | "shopping_visits",
+ "website": "https://www.amazon.com/...", "value": 182.5, "count": 7, "detail": "a Google ad"}
+```
+
+Signals are silent: nothing is spoken and the head doesn't move. `sales.py` keeps them per site for 30 minutes (`ad_referral` with `detail` = which ad; `sponsored` = clicked a paid search result; `retargeted` with `detail` = product/store and `value` = days since first visit; `upsell` with `detail` = the section; `cart` with `count` and `value` = total; `shopping_visit` with `value` = pages today), along with any sale `/sale` found. Detection rules are in `extension/adsignals.js`. When a checkout arrives with a `url` on that site, the AI prompt gets a "what you noticed on the page" section, and Piggyback brings it up ("An ad brought you here and the countdown is rushing you"). These are reasons to question, not to refuse; a real need still wins.
+
+Budget review (HTTP, extension button → `GET http://localhost:8000/review`, add `?speak_it=true` to have Piggyback say the summary out loud):
 
 ```json
 {"monthly_budget": 600, "spent": 369, "remaining": 231, "by_category": {"food": 244, "fun": 85},
@@ -68,7 +94,7 @@ Budget review (HTTP, `GET http://localhost:8000/review` from the bot or `curl`; 
  "summary": "...", "tips": ["...", "...", "..."], "expression": "skeptical", "error": null}
 ```
 
-The numbers are computed in code from the profile (`store.py`) and `decisions.jsonl`; Claude also sees the savings goals and money saved by letting things go. Claude only writes `summary`, `tips`, and `expression`. It gives general budgeting guidance only (no investment, tax, credit, or product advice). If Claude fails, `summary` is a plain computed sentence, `tips` is empty, and `error` says why. Takes a few seconds, so show a loading state.
+The numbers are computed in code from the profile (`store.py`) and `decisions.jsonl`; The AI also sees savings goals, money saved by letting things go, the waiting room, and recent arguments. It runs on Gemini through the same Vertex sign-in as the checkout chat (about 4 s), or on Claude when `ANTHROPIC_API_KEY` is set. The AI only writes `summary`, `tips`, and `expression`. It gives general budgeting guidance only (no investment, tax, credit, or product advice). If the AI fails, `summary` is a plain computed sentence, `tips` is empty, and `error` says why. Takes a few seconds, so show a loading state.
 
 Profile API (HTTP, used by the dashboard; every response is the dashboard summary):
 
@@ -110,10 +136,11 @@ ESP32 → brain (one JSON object per line):
 1. On `checkout`: start a session, send `alert`, then `thinking` while waiting for the LLM.
 2. The LLM returns JSON `{"line", "expression", "verdict"}`. The server moves the head, sends the line to the bot, and speaks it.
 3. After speaking a question, it waits for eye contact (up to 3 s, then says "Look me in the eyes and tell me." and waits 6 s more). The whole answer has to be said looking at the pig: speech only starts counting while the user is looking, and looking away for more than `LOOK_AWAY_GRACE` (0.6 s; a blink or glance is fine) mid-answer breaks it.
-   - First break: "You looked away. That doesn't count. Look at me and say it again." and they redo that answer.
-   - Second break: "You looked away twice. Argument over." The argument ends, the verdict comes right away, and it can't be better than `timer` (rule `looked_away`).
+   - First break: "You looked away. Look at me and say that again." and they redo that answer.
+   - Second break: "You looked away twice, so let's pause this one for a minute." The argument ends, the verdict comes right away, and it can't be better than `timer` (rule `looked_away`).
    Without a working camera, answers can't be verified, so close-to-budget and over-budget purchases get the strict rules.
-   It listens on the mic: recording starts at the first loud sound, stops after a 1 s pause (anything well below the speaker's own volume counts as a pause, so room noise doesn't keep it recording; max 8 s), and faster-whisper transcribes it. Nothing heard in 6 s counts as "(no answer)". A typed `answer` also works; whichever arrives first wins.
+   It sends `listening` when it starts recording (the overlay shows a pulsing "Listening. Take your time"). If nothing is said in `NO_SPEECH_SECONDS`, it nudges once ("Take your time. I'm listening.") and listens again; the second silence counts as "(no answer)". After a spoken answer it says a short "Hmm." / "Okay." so the ~2 s AI wait isn't dead air.
+   It listens on the mic: recording starts at the first loud sound, stops after a 0.8 s pause (`END_PAUSE`; anything well below the speaker's own volume counts as a pause, so room noise doesn't keep it recording; max 8 s), and faster-whisper transcribes it. Nothing heard in 6 s, twice, counts as "(no answer)". A typed `answer` also works; whichever arrives first wins.
 4. The budget tier sets how long the argument is (`QUESTIONS_BY_TIER`): **easy** (fits comfortably) 2 questions, **close** (more than half of what's left) 3, **over** (more than what's left) 3. The AI is told the tier and how the user's eye contact has gone, and presses harder on close and over.
    Its job is to stop impulse buys, not necessities: with each reply it also rates the purchase `need`, `want`, or `unclear`. A need (something they rely on broke or ran out, health or safety, required for work or school, can't wait) gets a release even if it hurts the budget; upgrades, duplicates, treats, gifts, and vague or changing stories are wants.
 5. `apply_rules()` can only make a verdict stricter. A **clean** argument means every answer was spoken with camera-verified, unbroken eye contact (typed answers never count) and nothing went unanswered.
@@ -122,7 +149,7 @@ ESP32 → brain (one JSON object per line):
    - over: escalate (`over_budget`), unless the argument was clean. Clean, and the AI says release and rated it a `need` → release (`necessity`, still needs the 3 s stare). Clean and the AI was convinced otherwise (release or timer) → timer (`over_budget_argued`).
    - two look-aways → timer, or escalate if over budget or the AI said escalate (`looked_away`). Invalid verdict → timer.
    A `release` then has to be earned: Piggyback sends `confirm`, says "Look me in the eyes for 3 seconds if you're sure," and the OLED lids close as you hold its stare. Looking away resets it. No 3-second stare within 10 s → `timer` with rule `no_eye_contact`.
-6. `decision` messages are logged to `decisions.jsonl` with the verdict. If the user completed a purchase after a `timer` or `escalate`, Piggyback looks disappointed and says "You bought it anyway." Completed purchases are added to the profile (seeded with a fake month of spending, a $600 budget, and one savings goal), and mark that item as bought in the waiting room.
+6. `decision` messages are logged to `decisions.jsonl` with the verdict. If the user completed a purchase after a `timer` or `escalate`, Piggyback looks disappointed and says "You went for it anyway. I'll keep that in mind." Completed purchases are added to the profile (seeded with a fake month of spending, a $600 budget, and one savings goal), and mark that item as bought in the waiting room.
 7. Memory (`store.py`): each verdict is saved as an argument (item, what the user said, need/want, verdict). A `timer` or `escalate` puts the item in the waiting room; checking out the same item again counts as another try. The AI is told the user's savings goals (and what share of the remaining goal this purchase is), which attempt this is, and what they said last time, so it can say "Third time this week" or "Last time you said they were a gift." On the dashboard the user can let a waiting item go (optionally moving its price into a goal) or say they still want it.
 
 Tracking (10×/s): the OLED pupils follow the user's face (`gaze`), and the head turns to keep the face centered in the camera (`look`). Since the camera is in the head, centered face = pig facing the user. Tracking pauses for ~1.3 s after each expression so the pose plays, and the head holds still while recording so servo noise doesn't reach the mic. When a face appears after 5 s of nobody, Piggyback wakes up (`alert`).
@@ -136,35 +163,43 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 ## Config (environment variables)
 
 - `LLM_PROVIDER` (checkout conversation): `gemini` (default, the plan), `claude`, or `mock` (canned lines, no API key; for testing and as a demo backup)
-- `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.8-flash`; check what the key supports)
-- Gemini sign-in, either:
-  - **API key** (simplest): create one at https://aistudio.google.com/apikey with a personal Gmail account and `export GEMINI_API_KEY=...`. School/work Google accounts often block API keys ("API Keys are Disallowed").
-  - **Vertex AI with Application Default Credentials** (for accounts that block keys): install the gcloud CLI, run `gcloud auth application-default login`, enable the Vertex AI API on a project with billing, then `export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=<project-id> GOOGLE_CLOUD_LOCATION=global`. No code change: the `google-genai` client picks these up.
-  - With Vertex AI, also run `gcloud auth application-default set-quota-project <project-id>` once, or you'll get a "without a quota project" warning and possible quota errors.
-  - `GEMINI_THINKING` (default `low`): how much the model reasons before answering. `low` measured ~1.5–2 s per reply on `gemini-3.8-flash` vs 3–5 s on the model default; this model rejects `minimal`.
-  - Check either with `python check_devices.py gemini`. Use separate projects for the brain and Alisha's bot so their usage limits don't collide; only the brain's project needs billing (it sends webcam frames).
+- Two Gemini sign-ins, one per job, so their usage limits never collide:
+  - **Checkout conversation** (`brain.py`): Vertex AI on project `piggyback-brain`, signed in with Application Default Credentials (the team's Google accounts block API keys). Install the gcloud CLI, run `gcloud auth application-default login` and `gcloud auth application-default set-quota-project piggyback-brain` once, then set `GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=piggyback-brain GOOGLE_CLOUD_LOCATION=global` (export them or put them in `.env`). A personal `GEMINI_API_KEY` also works if Vertex isn't set. Check with `python check_devices.py gemini`.
+  - **Page reading** (`sales.py`, `/sale` and `/cart`): `GEMINI_API_KEY_WEB`, Alisha's key from her own project. Only this key is used there; without it, page reading uses local checks only.
+  - Settings can go in a git-ignored `.env` next to `brain.py` (loaded at startup; real environment variables win). Never put keys in code.
+- `GEMINI_MODEL` (default `gemini-3.8-flash`), `GEMINI_THINKING` (default `low`; ~1.5–2 s per reply on 3.8-flash vs 3–5 s on the model default). If a model rejects the thinking setting (3.8-flash rejects `minimal`), that model is retried without it. On a free key, set `GEMINI_MODEL=gemini-3.5-flash GEMINI_THINKING=minimal` in `.env` (3.7/3.8-flash timed out on the free key).
+- `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`): the chat retries on this model when `GEMINI_MODEL` returns 429/503/504. The free tier allows 5 requests/min per model and a checkout uses up to 4, so back-to-back rehearsals on a free key hit it.
+- `GEMINI_WEB_MODEL` (default `gemini-3.5-flash-lite`, ~1 s): model for the page-reading checks in `sales.py`
 - `ANTHROPIC_API_KEY`, `EXECUTOR_MODEL` (default `claude-sonnet-5-5`), `ADVISOR_MODEL` (default `claude-opus-5-5`), `USE_ADVISOR` (default `1`; Claude advisor tool, beta `advisor-tool-2026-03-01`, used only for the final verdict so questions stay fast). Claude requests also enable server-side refusal fallbacks (`fallbacks: "default"`).
-- `REVIEW_MODEL` (default `claude-opus-5-5`): model for the budget review; needs `ANTHROPIC_API_KEY`
+- `REVIEW_PROVIDER` (default `gemini`, or `claude` when `ANTHROPIC_API_KEY` is set): who writes the budget review. `REVIEW_MODEL` (default `claude-opus-5-5`) is the Claude model; Gemini uses `GEMINI_MODEL`.
+- `SCRAPE_AI` (default `auto`): when the web-scraping checks (`/sale`, `/cart` in `sales.py`) call the LLM. `auto` = free local check first, LLM only when it isn't sure (lone "Sale" word, struck prices with no stated offer, cart missing a number or two local readers disagreeing); `always`; `never`. The checkout chat always uses the LLM.
 - `TIMER_SECONDS` (default `60`): cooling-off length sent with a `timer` verdict
 - `SERIAL_PORT` (default: auto-detect the first `/dev/cu.usbserial*`, `/dev/cu.SLAB_USBtoUART*`, or `/dev/cu.wchusbserial*`)
 - `SERIAL_BAUD` (default `115200`)
+ HEAD
 - `VOICE` (macOS `say` voice)
 - `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `CAMERA_URL` (unset; a wireless camera's stream URL, e.g. the Logitech on a Pi Zero running ustreamer at `http://pig-cam.local:8080/stream`; overrides the name and index, keeps only the newest frame, reconnects if Wi-Fi drops; set `MIC_DEVICE` to a mic on the laptop since the Logitech's mic isn't), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini)
+=======
+- `VOICE` (macOS `say` voice), `SPEECH_RATE` (default `215` words per minute; macOS default is about 180)
+- `END_PAUSE` (default `0.8`): seconds of quiet that end a spoken answer
+- `VISION` (default `1`; `0` turns off the camera), `CAMERA_NAME` (default `logitech`; the first camera whose name contains this), `CAMERA_INDEX` (unset; a number skips name matching), `SEND_FRAMES` (default `1`; `0` stops sending frames to Gemini)
+ 94fddb0b845e600e03025c5b687ae2e170a6f950
 - `CONFIRM_SECONDS` (default `3`), `CONFIRM_WAIT` (default `10`): stare needed to confirm a release, and how long to wait for it
 - `LOOK_AWAY_GRACE` (default `0.6`): seconds of looking away mid-answer that break it
 - Tracking calibration: `TRACK_GAIN` (default `0.15`), `TRACK_INVERT_PAN`, `TRACK_INVERT_TILT`, `GAZE_INVERT_X` (set to `1` if the head or pupils move away from the user)
 - Eye-contact thresholds: `LOOK_MAX_YAW` (`0.15`), `LOOK_MIN_PITCH` (`0.25`), `LOOK_MAX_PITCH` (`0.85`), `LOOK_MAX_EYE_TURN` (`0.45`)
 - `STORE` (default `json`; `firestore` for Cloud Run), `PROFILE_ID` (default `default`; the Firestore document), `PROFILE_FILE` (default `profile.json`; tests point it elsewhere)
 - `MIC_DEVICE` (default `logitech`; the first input whose name contains this)
+- `SPEAKER` (default `jbl`; Piggyback's voice goes to the first audio output whose name contains this, via `say -a`; re-checked every 30 s so a speaker that reconnects is picked up; falls back to the system default)
 - `LISTEN` (default `1`; `0` turns off the mic, answers must be typed), `WHISPER_MODEL` (default `base.en`), `MAX_LISTEN_SECONDS` (default `8`), `NO_SPEECH_SECONDS` (default `6`)
 
 Run:
 
 ```
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install fastapi uvicorn pyserial google-genai anthropic websockets faster-whisper sounddevice numpy mediapipe opencv-python pyobjc-framework-AVFoundation
-export GEMINI_API_KEY=...
-uvicorn brain:app --port 8000
+pip install -r requirements.txt
+python -m playwright install chromium   # only needed for bot/
+uvicorn brain:app --port 8000   # with the Vertex settings exported or in .env
 ```
 
 Test without the bot: `LISTEN=0 uvicorn brain:app --port 8000`, then `python test_client.py "Smart toaster" 400 kitchen` (add `--auto` for canned answers). Open `http://localhost:8000/` for the dashboard. `GET /health` shows the LLM provider, the store, whether the ESP32 is connected, and the remaining budget.
@@ -173,7 +208,7 @@ Close the Arduino Serial Monitor before starting the brain: only one program can
 
 Camera calibration: with the brain running, open `http://localhost:8000/vision.jpg` (refresh to update) and `http://localhost:8000/vision`. Sit where the user sits: the marker should turn green only when you look at the OLED eyes. Adjust the `LOOK_*` values from the numbers shown. Then check the head turns toward you, not away; if not, set `TRACK_INVERT_PAN` / `TRACK_INVERT_TILT`. Allow camera access for your terminal the first time.
 
-Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods can't take over: the camera and mic whose names contain "logitech". If none matches (e.g. testing on a laptop), it uses the first camera and the default mic that aren't a phone or virtual device (iPhone, iPad, Desk View, BlackHole, OBS, Zoom, Teams). `/health` and the startup log show which camera and mic were picked. Run `python check_devices.py` from your own Terminal app first: macOS asks for camera and microphone permission there, and commands run by Claude Code can't trigger the popup. Turning off Continuity Camera on nearby iPhones (Settings → General → AirPlay & Continuity) also helps. The Whisper model (~150 MB) downloads on the first run, so start the brain once before the venue Wi-Fi matters.
+Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods can't take over: the camera and mic whose names contain "logitech", and the speaker whose name contains "jbl" (`python check_devices.py speaker` lists outputs and says a test line on the one picked). If none matches (e.g. testing on a laptop), it uses the first camera and the default mic that aren't a phone or virtual device (iPhone, iPad, Desk View, BlackHole, OBS, Zoom, Teams). `/health` and the startup log show which camera, mic, and speaker were picked. Run `python check_devices.py` from your own Terminal app first: macOS asks for camera and microphone permission there, and commands run by Claude Code can't trigger the popup. Turning off Continuity Camera on nearby iPhones (Settings → General → AirPlay & Continuity) also helps. The Whisper model (~150 MB) downloads on the first run, so start the brain once before the venue Wi-Fi matters.
 
 ## ESP32 firmware (firmware/piggyback_esp32)
 
@@ -188,7 +223,7 @@ Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods ca
 
 ## Hardware
 
-- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, Logitech webcam with mic (on the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
+- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, Logitech webcam with mic (on the laptop), JBL speaker for Piggyback's voice (connected to the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
 - Webcam goes inside the head, between or just above the OLED eyes, so looking at the eyes = looking at the camera. Take it out of its clip/stand to save weight: MG90S servos are small, so keep the camera close to the tilt axis and leave slack in the USB cable so it doesn't drag the head. Its mic is now right next to the servos, which is why the head freezes while recording.
 - Power rules: servos run from the bench supply, never from the ESP32's 5V/VIN pin; the ESP32 is powered by the laptop's USB; all grounds shared (bench supply ground ↔ ESP32 GND). OLEDs run from the ESP32's 3.3V pin.
 
@@ -217,7 +252,7 @@ Each milestone has a test anyone can run and a pass check. Don't start the next 
 | B4 | Head calibrated | Lorraine, Hana | Same commands with the head shell mounted | Poses read clearly from where the user sits; `PRESETS`, `LIMITS`, and pins committed |
 | B5 | Pupils and stare | Lorraine, Hana | Send `{"gaze":[1,0]}`, `{"gaze":[-1,0.5]}`, then `{"stare":0}` … `{"stare":1}` | Pupils move to each side; stare lids close smoothly; an `expr` command returns to normal eyes |
 | C1 | Bot reads checkout | Alisha | Open checkout on the fake store (and one real store) with the brain off | Bot prints the right item, price, and category, and reconnects when the brain starts |
-| C2 | Bot ↔ brain | Alisha + Annie | Fake store → brain on the laptop (ESP32 unplugged) | Reaching checkout starts the questions; buying sends `completed`, leaving sends `abandoned`; both land in `decisions.jsonl`; buying after a `timer` triggers "You bought it anyway" |
+| C2 | Bot ↔ brain | Alisha + Annie | Fake store → brain on the laptop (ESP32 unplugged) | Reaching checkout starts the questions; buying sends `completed`, leaving sends `abandoned`; both land in `decisions.jsonl`; buying after a `timer` triggers "You went for it anyway" |
 | M4 | Full end-to-end | All | Fake store → brain → ESP32 over USB | Head and pupils follow the user, answers only count with eye contact, a release needs the 3 s stare, verdicts are spoken, 3 runs in a row |
 | M5 | Failure drills | All | During a run: unplug the ESP32's USB; set a bad API key; deny or unplug the mic; cover or unplug the camera | Brain keeps going (prints commands / uses default line / accepts typed answers / skips eye contact) and reconnects when replugged |
 | M6 | Latency check | Annie | Time from reaching checkout to first spoken word, and from end of an answer to the next line | Under ~3 s; if not, switch model, shorten prompt, or start `thinking` sooner |
@@ -227,6 +262,6 @@ Stretch milestones (only after M4): ElevenLabs voice.
 
 ## Next up
 
-- Personality tuning.
+- Personality: warm and playful, not harsh (tuned Nov 7); lines under 18 words.
 - Possible MLH prizes: Best Use of Gemini API; Best Use of ElevenLabs (swap `speak()` for an ElevenLabs voice).
 - Before judging: rehearse, record a backup video.

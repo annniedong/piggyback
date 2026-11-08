@@ -12,31 +12,45 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import serial
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, HttpUrl
 
 import store
+import sales
+from sales import load_env_file
+from sales import router as sales_router
 from vision import vision
+
+load_env_file()  # settings from the git-ignored .env, before the config below reads them; real env vars win
 
 # ---------------------------------------------------------------- config
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # gemini | claude | mock
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_THINKING = os.getenv("GEMINI_THINKING", "low")  # low | medium | high (some models: minimal); lower = faster
+# Tried when GEMINI_MODEL is rate-limited or times out. Quotas are per model, so this one usually has room.
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5-5")
 ADVISOR_MODEL = os.getenv("ADVISOR_MODEL", "claude-opus-5-5")
 USE_ADVISOR = os.getenv("USE_ADVISOR", "1") == "1"
-REVIEW_MODEL = os.getenv("REVIEW_MODEL", "claude-opus-5-5")  # on-demand budget review
+# On-demand budget review: Gemini (same sign-in as the checkout chat) unless a Claude key is set.
+REVIEW_PROVIDER = os.getenv("REVIEW_PROVIDER") or ("claude" if os.getenv("ANTHROPIC_API_KEY") else "gemini")
+REVIEW_MODEL = os.getenv("REVIEW_MODEL", "claude-opus-5-5")  # when REVIEW_PROVIDER=claude
 SERIAL_PORT = os.getenv("SERIAL_PORT")  # None = auto-detect
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "115200"))
 VOICE = os.getenv("VOICE")  # None = system default voice
+SPEECH_RATE = int(os.getenv("SPEECH_RATE", "215"))  # words per minute for `say` (macOS default is about 180)
+END_PAUSE = float(os.getenv("END_PAUSE", "0.8"))  # seconds of quiet that end a spoken answer
 TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
 LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+SPEAKER = os.getenv("SPEAKER", "jbl")  # Piggyback's voice: the first audio output whose name contains this
 MIC_DEVICE = os.getenv("MIC_DEVICE", "logitech")  # picked by name so iPhone/AirPods mics can't take over
 MAX_LISTEN_SECONDS = float(os.getenv("MAX_LISTEN_SECONDS", "8"))
 NO_SPEECH_SECONDS = float(os.getenv("NO_SPEECH_SECONDS", "6"))
@@ -60,10 +74,12 @@ VERDICTS = ["release", "timer", "escalate"]
 SERIAL_GLOBS = ["/dev/cu.usbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*", "/dev/cu.usbmodem*"]
 
 SYSTEM_PROMPT = """You are Piggyback, a robot piggy bank with a moving head and OLED eyes who sits on
-the user's desk and judges their online purchases before checkout. Your catchphrase is "Put it back."
+the user's desk and checks in on their online purchases before checkout. Your catchphrase is
+"Put it back." Save it for timers; don't say it every line.
 
-Personality: dry, skeptical, funny, a little dramatic, but on the user's side. You care about their
-budget more than they do. Never mean about the person, only about the purchase.
+Personality: warm, playful, a little cheeky, like a friend who's good with money and on their side.
+Curious, not accusatory: ask, don't lecture. Tease the purchase lightly, never the person, and never
+be sarcastic, harsh, or guilt-trippy. When they make a good point, say so.
 
 Your job is to stop impulse buys, not necessities. Tell needs from wants:
 - A need is something they rely on that broke or ran out, health or safety, or something work or school
@@ -73,27 +89,33 @@ Your job is to stop impulse buys, not necessities. Tell needs from wants:
 - Believe a reason that is specific and stays consistent. A vague reason, or a story that changes between
   answers, is a want until proven otherwise.
 
-Every reply is ONE spoken line: under 25 words, plain words, no emoji, no lists, no stage directions.
+Every reply is ONE spoken line: under 18 words, plain words, no emoji, no lists, no stage directions.
 It is read aloud by text-to-speech, so it must sound natural spoken.
 
 Only use facts you're given: the purchase, the budget, their spending history, their savings goals, past
-attempts to buy this, what they've said, and a webcam photo if one is attached. Never invent details about their room, desk, or belongings that you
+attempts to buy this, what you noticed on the page before checkout, what they've said, and a webcam photo
+if one is attached. Never invent details about their room, desk, or belongings that you
 weren't shown.
 
 Reply with JSON only: {"line": str, "expression": str, "verdict": str, "need": str}
 - expression is one of: idle, alert, suspicious, skeptical, satisfied, disappointed, thinking.
-- When asked a question turn, ask ONE short pointed question about the purchase and set verdict to "none".
+- When asked a question turn, ask ONE short, friendly question about the purchase and set verdict to "none".
   Good questions let them prove a need: what happened to the old one, what they use it for, whether it
   can wait, whether a cheaper option would do. Don't ask about other people's finances.
-  If they're saving for a goal, make them weigh the purchase against it. If they've tried to buy this
-  before, or said something different last time, call it out.
+  If they're saving for a goal, ask how the purchase fits with it. If they've tried to buy this
+  before, or said something different last time, mention it kindly.
+  What you noticed on the page (an ad or sponsored listing brought them, an ad that followed them around
+  the web, add-ons from "frequently bought together", a sale or countdown, a big cart, lots of shopping
+  today) are classic impulse pushes: bring them up and ask if they'd still buy it without the push.
+  You can explain the trick in a few words (sellers pay for every click; retargeting ads follow you after
+  you look at something). They're reasons to question, not reasons to refuse; a real need still wins.
 - The user answers out loud while looking you in the eyes, and the prompt says how their eye contact went.
-  Holding your gaze while arguing shows conviction; looking away is a weak sign worth teasing. Still judge
+  Holding your gaze while arguing shows conviction; looking away is worth a light tease. Still judge
   mainly on their reasons, not on eye contact alone.
 - When asked for the final verdict, set verdict to one of:
-  "release" (reasonable purchase or a proven need, let it go through),
-  "timer" (probably impulse, make them wait and reconsider),
-  "escalate" (bad idea or way over budget, tell their accountability buddy).
+  "release" (a reasonable purchase or a proven need: the default when the reasons are sensible),
+  "timer" (probably an impulse: a friendly "sleep on it", not a punishment),
+  "escalate" (clearly a bad idea or way over budget: loop in their accountability buddy).
   The line announces the verdict in character. Use "satisfied" for release, "skeptical" or
   "disappointed" for timer, "disappointed" for escalate.
 - need is your current read: "need" (they've shown a real necessity), "want", or "unclear".
@@ -113,17 +135,20 @@ RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
+NUDGE_LINE = "Take your time. I'm listening."
+ACKS = ["Hmm.", "Okay.", "Mm-hm.", "Right.", "Interesting."]  # said right after an answer is heard
+
 DEFAULT_QUESTION = {"line": "Hold on. Do you actually need this, or do you just want it?", "expression": "suspicious", "verdict": "none"}
 DEFAULT_VERDICT = {"line": "I can't decide, so you wait. Put it back for a minute.", "expression": "skeptical", "verdict": "timer"}
 
 RULE_LINES = {
-    "over_budget": ("escalate", "disappointed", "That's more than your whole remaining budget. Put it back. I'm telling your buddy."),
-    "half_budget": ("timer", "skeptical", "That eats more than half of what's left this month. Cool off first."),
-    "invalid_verdict": ("timer", "skeptical", "I'm not sure about this one. Wait a minute and think it over."),
-    "no_eye_contact": ("timer", "disappointed", "You can't even look me in the eye. Wait a minute."),
-    "looked_away": ("timer", "disappointed", "You looked away twice. Argument over."),
-    "over_budget_argued": ("timer", "skeptical", "That's over your budget, so no. But you argued it to my face, "
-                                                 "so you get a timer instead of a call to your buddy."),
+    "over_budget": ("escalate", "disappointed", "That's more than your whole remaining budget, so I'm looping in your buddy on this one."),
+    "half_budget": ("timer", "skeptical", "That's over half of what's left this month. Let's give it a minute first."),
+    "invalid_verdict": ("timer", "thinking", "I can't decide on this one. Give it a minute and see if you still want it."),
+    "no_eye_contact": ("timer", "skeptical", "I didn't get that stare, so let's give it a minute."),
+    "looked_away": ("timer", "skeptical", "You looked away twice, so let's pause this one for a minute."),
+    "over_budget_argued": ("timer", "thinking", "It's over budget, but you made a real case to my face. "
+                                                "Sleep on it instead of me calling your buddy."),
 }
 
 
@@ -257,6 +282,30 @@ head = Head()
 # ---------------------------------------------------------------- speech
 
 speech_proc = None
+_speaker = {"checked": 0.0, "id": None, "name": "system default"}
+
+
+def audio_outputs() -> list[tuple[str, str]]:
+    """(id, name) of every audio output, from `say -a ?` (lines like "   94 MacBook Pro Speakers")."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["say", "-a", "?"], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [tuple(line.strip().split(" ", 1)) for line in out.splitlines() if line.strip()[:1].isdigit()]
+
+
+def pick_speaker() -> tuple[str | None, str]:
+    """(id, name) of the first output whose name contains SPEAKER, else the system default (id None).
+    Re-checked every 30 s, so a speaker that connects or reconnects (new id) is picked up."""
+    if time.time() - _speaker["checked"] > 30:
+        found = next(((i, n) for i, n in audio_outputs() if SPEAKER and SPEAKER.lower() in n.lower()),
+                     (None, "system default"))
+        if found[1] != _speaker["name"] or not _speaker["checked"]:
+            log(f"Speaker: {found[1]}" + ("" if found[0] else f" (no output named like {SPEAKER!r})"))
+        _speaker.update(checked=time.time(), id=found[0], name=found[1])
+    return _speaker["id"], _speaker["name"]
 
 
 async def speak(line: str):
@@ -265,7 +314,9 @@ async def speak(line: str):
     log("🐷 Piggyback says:", line)
     if speech_proc and speech_proc.returncode is None:
         speech_proc.terminate()
-    args = ["say"] + (["-v", VOICE] if VOICE else []) + [line]
+    speaker, _ = pick_speaker()
+    args = (["say", "-r", str(SPEECH_RATE)] + (["-v", VOICE] if VOICE else [])
+            + (["-a", speaker] if speaker else []) + [line])
     try:
         speech_proc = await asyncio.create_subprocess_exec(*args)
     except FileNotFoundError:
@@ -359,7 +410,7 @@ def record_answer(frames, gate=lambda: True):
         peak = max(peak, rms)
         talking = loud and rms > peak * 0.2
         silence = 0.0 if talking else silence + FRAME / SAMPLE_RATE
-        if silence > 1.0 or elapsed > MAX_LISTEN_SECONDS:
+        if silence > END_PAUSE or elapsed > MAX_LISTEN_SECONDS:
             break
     return (np.concatenate(voiced) if voiced else None), False
 
@@ -410,17 +461,19 @@ FRAME_NOTE = ("\n\nAttached is a webcam photo of the user taken just now from Pi
 
 
 _gemini = None
-_gemini_thinking_ok = True  # flips off if the model rejects the thinking setting
+_gemini_no_thinking = set()  # models that rejected the thinking setting
 
 
-async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
-    global _gemini, _gemini_thinking_ok
+async def ask_gemini(prompt: str, image: bytes | None = None, system: str = SYSTEM_PROMPT,
+                     schema: dict = RESPONSE_SCHEMA, fast: bool = False) -> str:
+    """fast: one quick line where speed beats depth (add-to-bag remarks): use the lighter model only."""
+    global _gemini
     from google import genai
-    from google.genai import types
+    from google.genai import errors, types
 
     if _gemini is None:
-        # One client for the whole run, so each turn reuses the connection.
-        # Reads GEMINI_API_KEY, or the GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_* settings.
+        # One client for the whole run, so each turn reuses the connection. Uses the
+        # GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_* settings, or GEMINI_API_KEY. Never Alisha's page-reading key.
         _gemini = genai.Client()
     contents = prompt
     if image:
@@ -428,23 +481,32 @@ async def ask_gemini(prompt: str, image: bytes | None = None) -> str:
 
     def config(thinking: bool):
         return types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system,
             response_mime_type="application/json",
-            response_json_schema=RESPONSE_SCHEMA,
+            response_json_schema=schema,
             # One short spoken line doesn't need much reasoning, and thinking is most of the wait.
             thinking_config=types.ThinkingConfig(thinking_level=GEMINI_THINKING) if thinking else None,
         )
 
-    try:
-        resp = await _gemini.aio.models.generate_content(
-            model=GEMINI_MODEL, contents=contents, config=config(_gemini_thinking_ok))
-    except Exception as e:
-        if not _gemini_thinking_ok:
-            raise
-        log(f"Gemini rejected thinking_level={GEMINI_THINKING}, retrying without it:", repr(e))
-        _gemini_thinking_ok = False
-        resp = await _gemini.aio.models.generate_content(model=GEMINI_MODEL, contents=contents, config=config(False))
-    return resp.text or ""
+    models = [GEMINI_MODEL] + ([GEMINI_FALLBACK_MODEL] if GEMINI_FALLBACK_MODEL not in ("", GEMINI_MODEL) else [])
+    if fast and GEMINI_FALLBACK_MODEL:
+        models = [GEMINI_FALLBACK_MODEL]
+    for i, model in enumerate(models):
+        for thinking in ((False,) if model in _gemini_no_thinking else (True, False)):
+            try:
+                resp = await _gemini.aio.models.generate_content(model=model, contents=contents,
+                                                                 config=config(thinking))
+                return resp.text or ""
+            except errors.APIError as e:
+                if thinking and e.code == 400:  # this model doesn't support the thinking setting
+                    log(f"Gemini {model} rejected thinking_level={GEMINI_THINKING}, retrying without it")
+                    _gemini_no_thinking.add(model)
+                    continue
+                if e.code in (429, 503, 504) and i + 1 < len(models):
+                    log(f"Gemini {model} unavailable ({e.code}), retrying with {models[i + 1]}")
+                    break
+                raise
+    return ""
 
 
 _claude = None
@@ -504,15 +566,16 @@ async def ask_llm(session: dict, final: bool) -> dict:
     remaining = store.remaining(profile)
     recent = ", ".join(f'{p["item"]} ${p["price"]}' for p in profile["purchases"][-5:])
     history = store.context_for(profile, session["item"], session["price"])
+    seen = sales.seen_on(session.get("url"))
     transcript = "\n".join(f"{who}: {text}" for who, text in session["transcript"]) or "(nothing yet)"
     turn = ("Give your FINAL VERDICT now." if final else
             f"Ask question {session['questions'] + 1} of {session['total']}.")
     tier_note = {
-        "easy": "This fits the budget comfortably.",
-        "close": "This uses more than half of what's left this month. Make them argue for it and press on "
-                 "weak reasons. A release only stands if they hold eye contact through every answer.",
-        "over": "This is MORE than the whole remaining budget. Make them argue hard. Only a proven necessity "
-                "that can't wait earns a release; a good argument for a want earns a timer; otherwise escalate.",
+        "easy": "This fits the budget comfortably. Keep it light, and release it if their reasons are sensible.",
+        "close": "This uses more than half of what's left this month. Ask them to make their case and gently "
+                 "push on vague reasons. A release only stands if they hold eye contact through every answer.",
+        "over": "This is MORE than the whole remaining budget. Ask them to make a real case. Only a proven "
+                "necessity that can't wait earns a release; a good argument for a want earns a timer; otherwise escalate.",
     }[session["tier"]]
     if not session["verified"]:
         eyes = "Eye contact can't be checked right now."
@@ -523,7 +586,8 @@ async def ask_llm(session: dict, final: bool) -> dict:
     prompt = (
         f"Purchase: {session['item']} for ${session['price']} (category: {session['category']}).\n"
         f"Monthly budget ${profile['monthly_budget']}, ${remaining:.0f} left. Recent purchases: {recent}.\n"
-        + (f"{history}\n" if history else "") +
+        + (f"{history}\n" if history else "")
+        + (f"What you noticed on the page before checkout:\n{seen}\n" if seen else "") +
         f"{tier_note}\n{eyes}\n"
         f"Conversation so far:\n{transcript}\n\n{turn}"
     )
@@ -553,8 +617,12 @@ async def ask_llm(session: dict, final: bool) -> dict:
 
 REVIEW_PROMPT = """You are Piggyback, a robot piggy bank, giving the user a quick review of this month's
 spending. Dry, funny, on their side. Base everything only on the data given; never invent numbers.
+checkouts_completed / checkouts_abandoned count this calendar month; checkouts_today counts only today.
+Only say "today" about numbers from checkouts_today.
 Give general budgeting guidance (spending patterns, categories to cut, habits like waiting before
 buying). Do not give investment, tax, credit, or debt advice, and do not recommend financial products.
+If they have savings goals, say how this month's spending affects them. Give them credit for things
+they let go, and call out items still in the waiting room or arguments they lost.
 
 Reply with JSON:
 - summary: what Piggyback says out loud, under 45 words, plain spoken language, no emoji or lists.
@@ -582,6 +650,9 @@ def spending_stats() -> dict:
     decisions = []
     if DECISIONS_FILE.exists():
         decisions = [json.loads(l) for l in DECISIONS_FILE.read_text().splitlines() if l.strip()]
+    today = datetime.now().date().isoformat()
+    this_month = [d for d in decisions if str(d.get("time", "")).startswith(today[:7])]
+    today_only = [d for d in this_month if str(d.get("time", "")).startswith(today)]
     return {
         "monthly_budget": profile["monthly_budget"],
         "spent": store.spent(profile),
@@ -590,19 +661,36 @@ def spending_stats() -> dict:
         "purchases": profile["purchases"],
         "goals": profile["goals"],
         "saved_by_letting_go": store.saved_by_letting_go(profile),
-        "checkouts_completed": sum(d.get("outcome") == "completed" for d in decisions),
-        "checkouts_abandoned": sum(d.get("outcome") == "abandoned" for d in decisions),
-        "recent_decisions": decisions[-10:],
+        "waiting_room": [{k: w[k] for k in ("item", "price", "tries", "status")} for w in profile["waiting"]
+                         if w["status"] in ("waiting", "still_want")],
+        "recent_arguments": [{k: a.get(k) for k in ("item", "price", "verdict", "need")}
+                             for a in profile["arguments"][-10:]],
+        # Checkout counts are this calendar month and today, so the AI can't present all-time totals as "today".
+        "today": today,
+        "checkouts_completed": sum(d.get("outcome") == "completed" for d in this_month),
+        "checkouts_abandoned": sum(d.get("outcome") == "abandoned" for d in this_month),
+        "checkouts_today": {"completed": sum(d.get("outcome") == "completed" for d in today_only),
+                            "abandoned": sum(d.get("outcome") == "abandoned" for d in today_only)},
+        "recent_decisions": [{k: d.get(k) for k in ("time", "item", "outcome", "verdict")} for d in this_month[-10:]],
     }
 
 
 async def budget_review() -> dict:
     stats = spending_stats()
+    data = "This month's data:\n" + json.dumps(stats, indent=1)
+    if REVIEW_PROVIDER == "gemini":
+        result = json.loads(await ask_gemini(data, system=REVIEW_PROMPT, schema=REVIEW_SCHEMA))
+        if not str(result.get("summary", "")).strip():
+            raise ValueError("Gemini returned no summary")
+        if result.get("expression") not in EXPRESSIONS:
+            result["expression"] = "skeptical"
+        result["tips"] = [str(t) for t in result.get("tips", [])][:3]
+        return result
     resp = await claude_client().beta.messages.create(
         model=REVIEW_MODEL,
         max_tokens=16000,
         system=REVIEW_PROMPT,
-        messages=[{"role": "user", "content": "This month's data:\n" + json.dumps(stats, indent=1)}],
+        messages=[{"role": "user", "content": data}],
         output_config={"effort": "medium", "format": {"type": "json_schema", "schema": REVIEW_SCHEMA}},
         fallbacks="default",
         betas=["server-side-fallback-2026-07-01"],
@@ -616,8 +704,85 @@ async def budget_review() -> dict:
 # ---------------------------------------------------------------- server
 
 app = FastAPI()
-# The bot, the fake store page, and the dashboard call these from the browser.
+# The extension, the fake store page, and the dashboard call these from the browser.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# Fake store for the demo, at http://localhost:8000/store/ (the extension's content script runs there).
+app.mount("/store", StaticFiles(directory=HERE / "store", html=True), name="store")
+# Page reading for the extension: POST /sale and POST /cart (see sales.py).
+app.include_router(sales_router)
+
+
+class ShoppingAlert(BaseModel):
+    type: Literal["shopping_visit", "ad_referral", "sponsored", "retargeted", "upsell", "cart",
+                  "over_budget", "cart_count", "shopping_visits"]
+    website: HttpUrl
+    value: float | None = None  # visits today, the cart total, or days since a retargeted visit
+    count: int | None = None    # cart item count
+    detail: str | None = Field(None, max_length=120)  # which ad, "product"/"store", or the upsell section
+
+
+@app.post("/alert")
+def shopping_alert(alert: ShoppingAlert):
+    """Browsing signals from the extension. Silent: Piggyback brings them up at checkout instead."""
+    log("Browser signal:", alert.model_dump(mode="json"))
+    sales.note_alert(alert.type, str(alert.website), alert.value, alert.count, alert.detail)
+    return {"ok": True}
+
+
+class AddedToBag(BaseModel):
+    website: HttpUrl
+    item: str = Field("something", max_length=120)
+    price: float | None = Field(None, ge=0)
+
+
+REMARK_PROMPT = """You are Piggyback, a robot piggy bank: warm, playful, a little cheeky. The user just put
+something in their shopping bag. Say ONE quick spoken line, under 12 words, reacting to it, and hint that
+you'll talk about it at checkout. Don't ask a question they need to answer yet. No lecture, no emoji.
+Reply with JSON: line, expression (one of idle, alert, suspicious, skeptical, satisfied, disappointed, thinking)."""
+
+REMARK_SCHEMA = {
+    "type": "object",
+    "properties": {"line": {"type": "string"}, "expression": {"type": "string", "enum": EXPRESSIONS}},
+    "required": ["line", "expression"],
+    "additionalProperties": False,
+}
+
+REMARK_LINES = ["Ooh, into the bag. We'll talk at checkout.", "I saw that. We'll chat at checkout.",
+                "Noted. Save some arguments for checkout."]
+_last_remark = 0.0
+
+
+async def quick_remark(added: AddedToBag) -> dict:
+    default = {"line": random.choice(REMARK_LINES), "expression": "suspicious"}
+    if LLM_PROVIDER != "gemini":
+        return default
+    remaining = store.remaining(store.load())
+    price = f" for ${added.price:,.2f}" if added.price else ""
+    prompt = f"They added: {added.item}{price}. ${remaining:.0f} left in this month's budget."
+    try:
+        text = await asyncio.wait_for(ask_gemini(prompt, system=REMARK_PROMPT, schema=REMARK_SCHEMA, fast=True), 2.5)
+    except Exception as e:
+        log("Quick remark fell back to a canned line:", repr(e))
+        return default
+    reply = parse_reply(text, {**default, "verdict": "none"})
+    return {"line": reply["line"], "expression": reply["expression"]}
+
+
+@app.post("/added")
+async def added_to_bag(added: AddedToBag):
+    """Something went into the bag: one quick line out loud now; the argument waits for checkout."""
+    global _last_remark
+    log("Added to bag:", added.model_dump(mode="json"))
+    sales.note_added(str(added.website), added.item, added.price)
+    session = tracking["session"]
+    if (session and not session["done"]) or time.time() - _last_remark < 5:
+        return {"ok": True, "line": None}  # mid-argument, or a double click
+    _last_remark = time.time()
+    await head.expr("alert")
+    remark = await quick_remark(added)
+    await head.expr(remark["expression"])
+    await speak(remark["line"])
+    return {"ok": True, "line": remark["line"]}
 
 
 @app.get("/review")
@@ -648,7 +813,7 @@ async def review(speak_it: bool = False):
 @app.get("/health")
 def health():
     return {"ok": True, "llm": LLM_PROVIDER, "listening": LISTEN, "esp32": head.connected(),
-            "vision": vision.state["running"], "camera": vision.state["camera"],
+            "vision": vision.state["running"], "camera": vision.state["camera"], "speaker": pick_speaker()[1],
             "store": store.STORE, "remaining": store.remaining(store.load())}
 
 
@@ -822,14 +987,15 @@ async def stare_to_confirm() -> bool:
 async def say_and_show(ws: WebSocket, reply: dict, msg: dict):
     await head.expr(reply["expression"])
     await ws.send_json(msg)
+    await done_speaking()  # let a short "Hmm." finish instead of cutting it off
     await speak(reply["line"])
 
 
-async def next_turn(ws: WebSocket, session: dict):
+async def next_turn(ws: WebSocket, session: dict, pending: "asyncio.Task | None" = None):
     final = session["questions"] >= session["total"] or session["failed"]
     await head.expr("thinking")
     t0 = time.time()
-    reply = await ask_llm(session, final)
+    reply = await pending if pending else await ask_llm(session, final)
     log(f"Timing: AI replied in {time.time() - t0:.1f}s")
 
     if not final:
@@ -891,6 +1057,7 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
         if session["done"] or session["answered"] >= turn:
             return
         verified = eye_contact_available() and vision.state["present"]
+        nudged = False
         while True:
             gate = lambda: True
             t_wait = time.time()
@@ -906,15 +1073,24 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
                 return
             if verified:
                 log(f"Timing: waited {time.time() - t_wait:.1f}s for eye contact")
+            await ws.send_json({"type": "listening", "seconds": NO_SPEECH_SECONDS})
             text, broke = await asyncio.to_thread(listen, gate)
             log("Heard:", repr(text), "(looked away)" if broke else "")
+            if not text and not broke and not nudged:
+                # They may just be thinking: one gentle nudge, then silence counts as no answer.
+                nudged = True
+                await ws.send_json({"type": "nudge", "line": NUDGE_LINE})
+                await head.expr("thinking")
+                await speak(NUDGE_LINE)
+                await done_speaking()
+                continue
             if not broke:
                 break
             session["strikes"] += 1
             await ws.send_json({"type": "looked_away", "strikes": session["strikes"], "heard": text})
             if session["strikes"] == 1:
                 await head.expr("suspicious")
-                await speak("You looked away. That doesn't count. Look at me and say it again.")
+                await speak("You looked away. Look at me and say that again.")
                 await done_speaking()
                 continue
             # Second strike: the argument is over and the verdict comes now.
@@ -922,6 +1098,8 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
             await handle_answer(ws, session, turn, "[looked away mid-answer twice; argument forfeited]")
             return
         await ws.send_json({"type": "heard", "text": text})
+        if text:
+            await speak(random.choice(ACKS))  # covers the AI's ~2 s so it doesn't feel like dead air
         await handle_answer(ws, session, turn, text or "(no answer)", verified=verified)
     except Exception as e:
         log("Listening failed, waiting for a typed answer instead:", repr(e))
@@ -949,6 +1127,7 @@ async def ws_endpoint(ws: WebSocket):
                     "item": str(msg.get("item", "something")),
                     "price": price,
                     "category": str(msg.get("category", "other")),
+                    "url": str(msg.get("url") or ""),  # the checkout page, to match what the extension noticed
                     "tier": tier, "total": QUESTIONS_BY_TIER[tier],
                     "questions": 0, "answered": 0, "transcript": [], "done": False,
                     "verdict": None, "lock": asyncio.Lock(),
@@ -957,9 +1136,11 @@ async def ws_endpoint(ws: WebSocket):
                 }
                 log(f"Budget tier: {tier} ({session['total']} questions)")
                 await head.expr("alert")
-                await asyncio.sleep(0.6)  # let the alert pose land before thinking
+                # Start the AI now so it runs while the alert pose lands (saves ~0.6 s).
+                first = asyncio.create_task(ask_llm(session, final=False))
+                await asyncio.sleep(0.6)
                 async with session["lock"]:
-                    await next_turn(ws, session)
+                    await next_turn(ws, session, first)
 
             elif kind == "answer":
                 # Typed answers still work (test_client.py, or if the mic fails).
@@ -987,7 +1168,7 @@ async def ws_endpoint(ws: WebSocket):
                     # The bot can't block checkout, so Piggyback at least lets you know.
                     await done_speaking()  # let the verdict finish first
                     await head.expr("disappointed")
-                    await speak("You bought it anyway. I'll remember that.")
+                    await speak("You went for it anyway. I'll keep that in mind.")
                 else:
                     await head.expr("idle")
 

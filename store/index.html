@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gadget Barn</title>
+<style>
+  :root { --ink: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --accent: #0a7c55; --bg: #f7f7f8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { background: #fff; border-bottom: 1px solid var(--line); padding: 14px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 20px; margin: 0; }
+  header span { color: var(--muted); font-size: 13px; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px; display: grid; grid-template-columns: 1fr 320px; gap: 24px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+  .art { height: 96px; border-radius: 8px; display: grid; place-items: center; font-size: 40px; background: #f0f0f3; }
+  .name { font-weight: 600; }
+  .cat { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .price { font-size: 18px; font-weight: 700; }
+  button { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: #fff; padding: 8px 12px; cursor: pointer; }
+  button:hover { border-color: #c7c7cc; }
+  .cart { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; align-self: start; position: sticky; top: 16px; }
+  .cart h2 { margin: 0 0 10px; font-size: 17px; }
+  .line { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .line button { padding: 0 6px; border: none; color: var(--muted); }
+  .total { display: flex; justify-content: space-between; font-weight: 700; margin: 12px 0; }
+  #place-order { width: 100%; background: var(--accent); color: #fff; border: none; padding: 12px; font-weight: 600; }
+  #place-order:disabled { background: #b8c9c1; cursor: not-allowed; }
+  .empty { color: var(--muted); }
+  .done { margin-top: 12px; padding: 10px; border-radius: 8px; background: #e6f4ee; color: var(--accent); display: none; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+</style>
+</head>
+<body>
+<header><h1>Gadget Barn</h1><span>Demo store for Piggyback. Nothing here is real.</span></header>
+<main>
+  <section class="grid" id="products"></section>
+  <aside class="cart">
+    <h2>Your cart</h2>
+    <div id="lines"><p class="empty">Cart is empty.</p></div>
+    <div class="total"><span>Total</span><span id="total">$0.00</span></div>
+    <!-- The Piggyback extension intercepts clicks on data-piggyback="place-order"
+         and reads the order from the data-item / data-price / data-category attributes. -->
+    <button id="place-order" data-piggyback="place-order" disabled>Place order</button>
+    <div class="done" id="done"></div>
+  </aside>
+</main>
+<footer>Try an ad link: <a href="?gclid=demo">?gclid=demo</a></footer>
+<script>
+  const PRODUCTS = [
+    { id: "toaster", name: "Smart toaster", price: 400, category: "kitchen", art: "🍞" },
+    { id: "socks", name: "Wool socks", price: 12, category: "clothes", art: "🧦" },
+    { id: "headphones", name: "Noise-cancelling headphones", price: 279, category: "electronics", art: "🎧" },
+    { id: "lamp", name: "Desk lamp", price: 35, category: "home", art: "💡" },
+    { id: "sneakers", name: "Limited sneakers", price: 650, category: "clothes", art: "👟" },
+    { id: "game", name: "Video game", price: 70, category: "fun", art: "🎮" },
+  ];
+  const cart = new Map();
+  const $ = (id) => document.getElementById(id);
+
+  $("products").innerHTML = PRODUCTS.map(p => `
+    <div class="card">
+      <div class="art">${p.art}</div>
+      <div class="cat">${p.category}</div>
+      <div class="name">${p.name}</div>
+      <div class="price">$${p.price}</div>
+      <button data-add="${p.id}">Add to cart</button>
+    </div>`).join("");
+
+  document.addEventListener("click", (e) => {
+    const add = e.target.closest("[data-add]");
+    const rm = e.target.closest("[data-remove]");
+    if (add) cart.set(add.dataset.add, (cart.get(add.dataset.add) || 0) + 1);
+    if (rm) cart.delete(rm.dataset.remove);
+    if (add || rm) render();
+  });
+
+  function render() {
+    const items = [...cart].map(([id, qty]) => ({ ...PRODUCTS.find(p => p.id === id), qty }));
+    const total = items.reduce((s, p) => s + p.price * p.qty, 0);
+    $("lines").innerHTML = items.length ? items.map(p => `
+      <div class="line"><span>${p.qty}× ${p.name}</span>
+      <span>$${p.price * p.qty} <button data-remove="${p.id}" title="Remove">✕</button></span></div>`).join("")
+      : '<p class="empty">Cart is empty.</p>';
+    $("total").textContent = `$${total.toFixed(2)}`;
+    const btn = $("place-order");
+    btn.disabled = !items.length;
+    // Order summary for the extension: name the priciest item, total price, its category.
+    const top = items.slice().sort((a, b) => b.price - a.price)[0];
+    btn.dataset.item = !items.length ? "" :
+      items.length === 1 && top.qty === 1 ? top.name : `${top.name} and ${items.reduce((n, p) => n + p.qty, 0) - 1} more`;
+    btn.dataset.price = total;
+    btn.dataset.count = items.reduce((n, p) => n + p.qty, 0);
+    btn.dataset.category = top ? top.category : "other";
+  }
+
+  // The store's own checkout. Only runs if Piggyback lets the click through.
+  $("place-order").addEventListener("click", () => {
+    $("done").textContent = `Order placed: ${$("place-order").dataset.item} for $${$("place-order").dataset.price}.`;
+    $("done").style.display = "block";
+    cart.clear();
+    render();
+  });
+  render();
+
+  // Sale mode for testing Piggyback's sale detection: http://localhost:8000/store/?sale=1
+  if (new URLSearchParams(location.search).has("sale")) {
+    const banner = document.createElement("div");
+    banner.style.cssText = "background:#d6336c;color:#fff;text-align:center;padding:10px;font-weight:600";
+    banner.textContent = "FLASH SALE: 30% off everything with code SAVE30. Ends tonight!";
+    document.body.prepend(banner);
+    document.querySelectorAll(".card .price").forEach((el) => {
+      const was = el.textContent;
+      el.innerHTML = `<s style="color:#6e6e73;font-weight:400;font-size:14px">${was}</s> ` +
+        `$${(parseFloat(was.slice(1)) * 0.7).toFixed(2)}`;
+    });
+  }
+</script>
+</body>
+</html>
