@@ -6,6 +6,8 @@
 // The demo store marks its button with data-piggyback="place-order" plus data-item, data-price,
 // data-category. On other sites the total is read from the button ("Pay $84.00") or the page's
 // "Order total" / "Total" line. Turn off with "Hold checkout on all sites" in the popup.
+// Demo mode (the brain's DEMO_MODE, sent with each verdict; on until the brain says otherwise): a
+// real store's final "Place order" / "Pay now" never goes through, even after Piggyback says yes.
 // The WebSocket to the brain goes through background.js: Chrome blocks web pages from
 // connecting to localhost directly.
 
@@ -13,25 +15,34 @@
   const PLACE_ORDER = /^(place (my |your )?order|place order (and|&) pay|complete (my |your )?(order|purchase)|submit (my |your )?order|confirm (order|purchase|and pay)|pay now|pay( with [a-z ]+)?|pay [$€£]?\s?\d[\d,.]*|buy now|buy it now|purchase|complete checkout)$/i;
   // The cart's checkout button: the earliest point to step in, before shipping and payment pages.
   const CHECKOUT = /^(check ?out( now| securely)?|secure check ?out|proceed to (secure )?check ?out|continue to (check ?out|payment)|go to check ?out|start check ?out|begin check ?out|review (and|&) pay)$/i;
-  const CLEARED_FOR_MS = 30 * 60 * 1000; // after going ahead, don't hold the same site's checkout again
+  // After going ahead, don't hold the same site's checkout again for a while (shorter at the judging table).
+  const clearedForMs = () => (demoMode ? 3 : 30) * 60 * 1000;
   const site = location.hostname.replace(/^www\./, "");
   const MONEY = /[$€£]\s*([0-9][0-9,]*(?:\.[0-9]{2})?)/;
   const TOTAL_LABELS = [/^\s*(order total|total due|estimated total|grand total|total)\b/i, /^\s*(estimated\s+)?subtotal\b/i];
   const isDemoStore = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && location.pathname.startsWith("/store");
 
   let holdEverywhere = true;
+  let demoMode = true;  // safe until a verdict says the brain isn't in demo mode
   let cleared = {}; // site -> time the user went ahead with a checkout there
   try {
-    chrome.storage.local.get({ holdEverywhere: true, clearedSites: {} }, (r) => {
+    chrome.storage.local.get({ holdEverywhere: true, demoMode: true, clearedSites: {} }, (r) => {
       holdEverywhere = r.holdEverywhere;
+      demoMode = r.demoMode;
       cleared = r.clearedSites;
     });
     chrome.storage.onChanged.addListener((c) => {
       if (c.holdEverywhere) holdEverywhere = c.holdEverywhere.newValue;
+      if (c.demoMode) demoMode = c.demoMode.newValue !== false;
       if (c.clearedSites) cleared = c.clearedSites.newValue || {};
     });
   } catch {}
-  const recentlyCleared = () => Date.now() - (cleared[site] || 0) < CLEARED_FOR_MS;
+  function setDemoMode(on) {
+    if (on === demoMode) return;
+    demoMode = on;
+    try { chrome.storage.local.set({ demoMode: on }); } catch {}
+  }
+  const recentlyCleared = () => Date.now() - (cleared[site] || 0) < clearedForMs();
   function markCleared() {
     cleared = { ...cleared, [site]: Date.now() };
     try { chrome.storage.local.set({ clearedSites: cleared }); } catch {}
@@ -56,11 +67,29 @@
   }
 
   // "Checkout · $45.00" / "Proceed to checkout (2 items)" / "CHECKOUT →" -> "Checkout" / "Proceed to checkout"
-  function isCheckoutLabel(btn) {
+  function labelMatches(btn, ...patterns) {
     const clean = (t) => (t || "").replace(/\s+/g, " ").replace(/\(.*?\)/g, "")
       .replace(/[·•|–-]?\s*[$€£]\s?\d[\d,.]*/g, "").replace(/[^\p{L}\p{N}&$€£ ]+/gu, " ").replace(/\s+/g, " ").trim();
     return [btn.innerText, btn.value, btn.getAttribute("aria-label"), btn.getAttribute("title")]
-      .map(clean).some((l) => l && l.length <= 40 && (PLACE_ORDER.test(l) || CHECKOUT.test(l)));
+      .map(clean).some((l) => l && l.length <= 40 && patterns.some((re) => re.test(l)));
+  }
+  const isCheckoutLabel = (btn) => labelMatches(btn, PLACE_ORDER, CHECKOUT);
+  const isPlaceOrder = (btn) => labelMatches(btn, PLACE_ORDER);
+
+  // Demo mode: a real store's final order button, whatever else is going on (released, cleared, holding off).
+  function demoBlocked(target) {
+    if (!demoMode || isDemoStore || !(target instanceof Element)) return null;
+    const btn = target.closest("button, input[type=submit], input[type=button], a, [role=button]");
+    return btn && isPlaceOrder(btn) ? btn : null;
+  }
+  function demoNote() {
+    const note = document.createElement("div");
+    note.textContent = "🐷 Piggyback demo: no real order was placed.";
+    note.style.cssText = "all: initial; position: fixed; left: 16px; bottom: 16px; z-index: 2147483647; " +
+      "background: #24161c; color: #fff; font: 600 14px -apple-system, system-ui, sans-serif; padding: 12px 16px; " +
+      "border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.25);";
+    document.documentElement.appendChild(note);
+    setTimeout(() => note.remove(), 4000);
   }
 
   // For DevTools: right-click the button > Inspect, then piggybackCheckoutCheck($0)
@@ -123,7 +152,10 @@
   // Capture phase on window runs before any handler the page attached to the button.
   window.addEventListener("click", (e) => {
     const btn = findCheckoutButton(e.target);
-    if (!btn) return;
+    if (!btn) {
+      if (!bypass && demoBlocked(e.target)) { e.preventDefault(); e.stopImmediatePropagation(); demoNote(); }
+      return;
+    }
     if (bypass) { bypass = false; return; }
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -161,6 +193,9 @@
   // Also catch forms submitted with Enter.
   window.addEventListener("submit", (e) => {
     const btn = e.submitter && findCheckoutButton(e.submitter);
+    if (!btn && !bypass && e.submitter && demoBlocked(e.submitter)) {
+      e.preventDefault(); e.stopImmediatePropagation(); demoNote(); return;
+    }
     if (!btn || bypass) return;
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -190,6 +225,7 @@
 
   function releaseCheckout(btn) {
     if (!btn) return; // started from the checkout page itself: just let them continue
+    if (demoMode && !isDemoStore && isPlaceOrder(btn)) { demoNote(); return; } // never a real order at the demo
     bypass = true;
     btn.click();
     bypass = false;
@@ -324,6 +360,7 @@
         ui.say(msg.line, "suspicious");
         armTimeout();
       } else if (msg.type === "verdict") {
+        if (typeof msg.demo === "boolean") setDemoMode(msg.demo);
         ui.say(msg.line, msg.expression);
         ui.verdict(msg, {
           buy: () => finish("completed"),

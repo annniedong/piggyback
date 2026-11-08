@@ -39,12 +39,21 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 - `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget, and "Stare history" from `/trends` (eye contact per argument, spent vs. saved per day, riskiest hour; hidden without Tiger Data). Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
 - `seed_demo.py` (laptop): fills the demo with three weeks of history: goals, purchases ($231 left of $600), a waiting room with let-go items, 11 past arguments with quotes, `decisions.jsonl`, and in Tiger Data the matching events plus a gaze time series per argument (eye contact high on releases, low on stopped ones; 11 pm is the riskiest hour). Backs up `profile.json` and `decisions.jsonl` to `*.backup-<time>` first and empties the Tiger tables. Run `python seed_demo.py` before a demo; works while the brain runs.
 - `check_devices.py` (laptop): checks the camera, mic, speaker, and Gemini before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
+- `demo.sh` (laptop): the judging table. `./demo.sh` seeds fresh demo data and runs the brain in demo mode, restarting it if it crashes; `./demo.sh --keep` keeps today's history after a restart. See Demo mode below.
 - `tests/test_integration.py` (laptop): integration tests, `python -m unittest discover tests` (~40 s). Each starts a real brain on a spare port (mock AI, typed answers, no camera/mic/ESP32, a silent `say`, its own `PROFILE_FILE`/`DECISIONS_FILE`) and drives it like the extension: budget tiers and rules, waiting room and retries, the bought-anyway shake finishing before idle, disconnects, `/added`, `/alert`, the profile API, the review fallback, and an unreachable database. The Tiger Data tests run in a throwaway schema (dropped after) and are skipped without `TIGER_DB_URL`.
 - `test_client.py` (laptop): pretends to be the extension for testing the brain (`--auto` canned answers, `--voice` answer out loud; `BRAIN_URL` for another port).
 - `extension/` (Chrome, Manifest V3): holds "Place order" on the demo store and runs the checkout conversation (`content.js`), Budget review popup (`popup.html`), browsing alerts to `/alert` (`background.js`). Load unpacked; see `extension/README.md`.
 - `store/` (served by the brain at http://localhost:8000/store/): fake demo store; its Place order button carries `data-piggyback="place-order"` with `data-item`, `data-price`, `data-category`.
 - `sales.py` (laptop): `POST /sale`, AI check for sales/coupons/promo codes on a shopping page, and `POST /cart`, AI reading of item count + subtotal from any store's cart page or cart drawer. Uses only `GEMINI_API_KEY_WEB`; local checks without it. Loaded into `brain.py` with `include_router`; also loads the git-ignored `.env`.
 - `bot/` (laptop, optional): Playwright browser that watches Amazon/Target/Walmart tabs and posts browsing alerts to `/alert`. Separate process; see `bot/README.md`. Tests: `python -m unittest bot.test_detector`.
+
+## Demo mode (judging table)
+
+`./demo.sh` sets `DEMO_MODE=1`, `TIMER_SECONDS=20`, `DEMO_RESET_MINUTES=10` (unless `.env` says otherwise), seeds the demo, and keeps the brain running. Visitors shop on any real site in the demo Chrome and run into Piggyback at checkout.
+
+- No real orders: every `verdict` carries `"demo": true`, and the extension remembers it (it assumes demo until a verdict says otherwise). On real stores, final order buttons (`PLACE_ORDER` labels: "Place order", "Pay now", "Buy now"...) never go through, not after a release, not inside the "already went ahead" window, not with holding turned off: the visitor sees "Piggyback demo: no real order was placed", and a released one still counts as `completed`, so the budget drops. "Proceed to checkout" buttons still work, so visitors can walk through a checkout. Payment buttons inside a store's iframe (Shop Pay, PayPal) can't be seen, so use a Chrome profile with no saved cards or signed-in store accounts.
+- After going ahead on a site, its checkout isn't held again for 3 minutes (30 outside demo mode); adding something to the bag ends that early.
+- Next visitor: the dashboard's "↺ Next visitor" button (`POST /demo/reset`, 403 outside demo mode, 409 mid-argument), or by itself after `DEMO_RESET_MINUTES` with no activity. It puts back `seed_demo.py`'s profile and decisions and forgets what the extension noticed on sites. Tiger Data keeps everyone's arguments, so the stare history fills up over the day.
 
 ## Message formats
 
@@ -198,6 +207,7 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - Tracking calibration: `TRACK_GAIN` (default `0.15`), `TRACK_INVERT_PAN`, `GAZE_INVERT_X` (set to `1` if the head or pupils move away from the user)
 - Eye-contact thresholds: `LOOK_MAX_YAW` (`0.15`), `LOOK_MIN_PITCH` (`0.25`), `LOOK_MAX_PITCH` (`0.85`), `LOOK_MAX_EYE_TURN` (`0.45`)
 - `TIGER_DB_URL` (unset = off): Tiger Cloud connection string (`postgres://…?sslmode=require`), in `.env` only. Service: 0.5 CPU, development, us-east-1, no replica or pooler; allow the venue's IP (or all IPs) in its allow list. `TZ_NAME` (default `America/New_York`): local time for days and hours; changing it means dropping `money_by_day` so it's rebuilt.
+- `DEMO_MODE` (default `0`; `demo.sh` sets `1`), `DEMO_RESET_MINUTES` (default `10`): see Demo mode
 - `DECISIONS_FILE` (default `decisions.jsonl`; tests point it elsewhere)
 - `STORE` (default `json`; `firestore` for Cloud Run), `PROFILE_ID` (default `default`; the Firestore document), `PROFILE_FILE` (default `profile.json`; tests point it elsewhere)
 - `MIC_DEVICE` (default `macbook`, the laptop's built-in mic; the first input whose name contains this. `logitech` uses the webcam's mic instead)

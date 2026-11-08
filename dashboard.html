@@ -51,9 +51,9 @@
 
   /* Hero: the pig + its opinion */
   .hero { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center;
-          background: var(--pink); border: 2px solid var(--line); border-radius: 28px; padding: 22px; box-shadow: var(--shadow);
+          background: var(--pink); border: 2px solid var(--line); border-radius: 28px; padding: 22px 22px 36px; box-shadow: var(--shadow);
           position: relative; overflow: hidden; }
-  .hero::after { content: "PUT IT BACK · PUT IT BACK · PUT IT BACK · PUT IT BACK · PUT IT BACK ·";
+  .hero::after { content: "PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · PUT IT BACK, PIGGYBACK · ";
                  position: absolute; bottom: 8px; left: 0; white-space: nowrap; font: 800 11px var(--display);
                  letter-spacing: .18em; color: rgba(36, 22, 28, .25); animation: ticker 18s linear infinite; }
   .pig { width: 132px; height: 120px; flex: none; }
@@ -170,7 +170,7 @@
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
   @media (max-width: 640px) {
-    .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 18px 16px 30px; }
+    .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 18px 16px 40px; }
     .bubble::before { left: 50%; top: -12px; transform: translateX(-50%) rotate(135deg); }
     .pig { width: 108px; height: 98px; }
     .stats { grid-template-columns: 1fr; }
@@ -185,7 +185,10 @@
 <main>
   <div class="top">
     <h1 class="logo">Piggy<span>back</span></h1>
-    <span class="live" id="status">Loading…</span>
+    <span style="display:flex; gap:8px; align-items:center">
+      <button id="next-visitor" hidden title="Back to the demo budget, goals and waiting room">↺ Next visitor</button>
+      <span class="live" id="status">Loading…</span>
+    </span>
   </div>
 
   <section class="hero" aria-live="polite">
@@ -458,6 +461,15 @@ document.addEventListener("pointermove", (e) => {
   const dx = Math.max(-1, Math.min(1, (e.clientX - (box.left + box.width / 2)) / 300));
   const dy = Math.max(-1, Math.min(1, (e.clientY - (box.top + box.height / 2)) / 300));
   pupils.forEach((p) => p.setAttribute("transform", `translate(${dx * 9} ${dy * 5})`));
+});
+
+// Judging table: one click puts the demo back for the next person.
+api("/health").then((h) => { $("next-visitor").hidden = !h.demo; }).catch(() => {});
+$("next-visitor").addEventListener("click", async (e) => {
+  e.target.disabled = true;
+  try { render(await api("/demo/reset", "POST")); refreshHistory(); }
+  catch (err) { alert(err.message); }
+  e.target.disabled = false;
 });
 
 refresh();

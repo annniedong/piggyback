@@ -196,6 +196,7 @@ class CheckoutTest(unittest.TestCase):
         self.assertIn(v["verdict"], ("release", "timer"))  # the mock AI picks either; no rule overrides it
         self.assertIsNone(v["rule"])
         self.assertTrue(v["line"])
+        self.assertIs(v["demo"], False)  # the extension may place real orders
         p = self.brain.get("/profile")
         self.assertEqual(p["remaining"], REMAINING - EASY)
         self.assertEqual(p["purchases"][0]["item"], "Phone case")
@@ -316,6 +317,7 @@ class ApiTest(unittest.TestCase):
         p = self.brain.post(f"/waiting/{waiting['Air fryer']['id']}/still_want")
         self.assertEqual([(w["item"], w["status"]) for w in p["waiting"]], [("Air fryer", "still_want")])
         self.assertEqual(self.brain.status_of("POST", "/waiting/nope/still_want"), 404)
+        self.assertEqual(self.brain.status_of("POST", "/demo/reset"), 403)  # only in demo mode
 
     def test_budget_review_numbers_without_ai(self):
         self.brain.argue("Phone case", EASY, "electronics", decision="completed")
@@ -326,6 +328,39 @@ class ApiTest(unittest.TestCase):
         self.assertIn("food", r["by_category"])
         self.assertTrue(r["error"])  # the AI is unreachable here, so the summary is the computed one
         self.assertIn(f"${p['remaining']:.0f} left", r["summary"])
+
+
+class DemoModeTest(unittest.TestCase):
+    """The judging table: verdicts tell the extension it's a demo, and the profile resets for each visitor."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.brain = Brain(DEMO_MODE="1", DEMO_RESET_MINUTES="0.05")  # 3 s idle resets
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.brain.stop()
+
+    def assert_fresh_demo(self, p):
+        self.assertEqual((p["remaining"], p["saved_by_letting_go"], p["arguments_total"]), (231, 463, 11))
+        self.assertEqual({g["name"] for g in p["goals"]}, {"Spring break trip", "New laptop"})
+
+    def test_reset_button_and_demo_flag(self):
+        self.assertTrue(self.brain.get("/health")["demo"])
+        v = verdict_of(self.brain.argue("Designer jacket", OVER, "clothing", decision="completed"))
+        self.assertIs(v["demo"], True)
+        self.assert_fresh_demo(self.brain.post("/demo/reset"))
+        decisions = self.brain.decisions.read_text().splitlines()
+        self.assertEqual(len(decisions), 11)
+        self.assertNotIn("Designer jacket", "".join(decisions))
+
+    def test_resets_by_itself_after_idle(self):
+        self.brain.post("/demo/reset")
+        before = self.brain.log_size()
+        self.brain.argue("Phone case", EASY, "electronics", decision="completed")
+        self.assertEqual(self.brain.get("/profile")["remaining"], 231 - EASY)
+        self.brain.wait_log("Demo: reset for the next visitor", before, timeout=20)
+        self.assert_fresh_demo(self.brain.get("/profile"))
 
 
 @unittest.skipUnless(TIGER_DB_URL, "TIGER_DB_URL not set (environment or .env)")
