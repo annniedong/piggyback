@@ -5,6 +5,7 @@
 //   {"gaze": [x, y]} (-1..1) moves the pupils to look at the user (no reply, sent ~10x/s)
 //   {"stare": p} (0..1) stare-down eyes with lids closing as p grows; any "expr" ends it (no reply)
 //   {"gesture": "shake" | "nod" | "lookback" | "center"} head motion only, eyes unchanged
+//   {"budget": [left, total], "note": "-$45 socks"} shows the budget on the third OLED ("note" optional)
 // Replies: {"ready":true} at boot, then {"ok":true} | {"err":"..."} | {"pong":1}
 // Also prints each head-motion step as it starts, so you can see which move is which:
 //   {"move":"skeptical","step":"3/5","doing":"glance back at you","pan":90,"tilt":90,"ms":375}
@@ -25,6 +26,9 @@ const int TILT_PIN = 19;
 const int LEFT_SDA = 21, LEFT_SCL = 22;    // I2C bus 0
 const int RIGHT_SDA = 25, RIGHT_SCL = 26;  // I2C bus 1
 const uint8_t OLED_ADDR = 0x3C;
+// Budget screen: a third SSD1306 sharing an I2C bus with one eye, so it needs the other address
+// (0x3D: move the resistor/jumper on its back labelled "I2C address"). Found on either bus at boot.
+const uint8_t BUDGET_ADDR = 0x3D;
 
 // ---------------------------------------------------------------- limits and presets (calibrate on the head)
 
@@ -134,6 +138,7 @@ TwoWire bus1 = TwoWire(1);
 Adafruit_SSD1306 leftEye(128, 64, &Wire, -1);
 Adafruit_SSD1306 rightEye(128, 64, &bus1, -1);
 bool leftOk = false, rightOk = false;
+Adafruit_SSD1306* budgetScreen = nullptr;  // set in setup() if the third OLED answers
 Servo panServo, tiltServo;
 
 // ---------------------------------------------------------------- motion (smoothstep, non-blocking)
@@ -342,6 +347,79 @@ void stepEyes() {
   }
 }
 
+// ---------------------------------------------------------------- budget screen (third OLED)
+
+long budgetLeft = 0, budgetTotal = 0;
+bool budgetKnown = false;
+char budgetNote[24] = "";
+unsigned long budgetNoteUntil = 0;  // the note shows for a few seconds, then the screen goes back to normal
+
+// Print `text` centered horizontally at row y, in text size `size` (each character is 6*size px wide).
+void centerText(Adafruit_SSD1306& d, const char* text, int y, int size) {
+  d.setTextSize(size);
+  int w = strlen(text) * 6 * size;
+  d.setCursor(w < 128 ? (128 - w) / 2 : 0, y);
+  d.print(text);
+}
+
+void drawBudget() {
+  if (!budgetScreen) return;
+  Adafruit_SSD1306& d = *budgetScreen;
+  d.clearDisplay();
+  d.setTextColor(SSD1306_WHITE);
+  char line[24];
+  if (!budgetKnown) {
+    centerText(d, "PIGGYBACK", 16, 2);
+    centerText(d, "waiting for budget", 44, 1);
+    d.display();
+    return;
+  }
+  bool over = budgetLeft < 0;
+  centerText(d, over ? "OVER BUDGET BY" : "LEFT THIS MONTH", 0, 1);
+  snprintf(line, sizeof(line), "$%ld", over ? -budgetLeft : budgetLeft);
+  centerText(d, line, 13, strlen(line) <= 5 ? 3 : 2);  // big number; smaller if it's long
+  // Gauge: how much of the month's budget is left.
+  float frac = budgetTotal > 0 ? constrain((float)budgetLeft / budgetTotal, 0.0f, 1.0f) : 0;
+  d.drawRect(4, 40, 120, 10, SSD1306_WHITE);
+  d.fillRect(6, 42, (int)(116 * frac), 6, SSD1306_WHITE);
+  if (budgetNote[0] && millis() < budgetNoteUntil) {
+    centerText(d, budgetNote, 55, 1);
+  } else {
+    snprintf(line, sizeof(line), "of $%ld budget", budgetTotal);
+    centerText(d, line, 55, 1);
+  }
+  d.display();
+}
+
+void setBudget(long left, long total, const char* note) {
+  budgetLeft = left;
+  budgetTotal = total;
+  budgetKnown = true;
+  if (note && note[0]) {
+    strncpy(budgetNote, note, sizeof(budgetNote) - 1);
+    budgetNote[sizeof(budgetNote) - 1] = '\0';
+    budgetNoteUntil = millis() + 6000;
+  }
+  drawBudget();
+  char out[96];
+  snprintf(out, sizeof(out), "{\"budget\":\"$%ld left of $%ld\",\"screen\":%s}", left, total,
+           budgetScreen ? "true" : "false");
+  Serial.println(out);
+}
+
+void stepBudget() {
+  // Clear the note once its time is up.
+  if (budgetNote[0] && millis() >= budgetNoteUntil) {
+    budgetNote[0] = '\0';
+    drawBudget();
+  }
+}
+
+bool i2cAnswers(TwoWire& bus, uint8_t addr) {
+  bus.beginTransmission(addr);
+  return bus.endTransmission() == 0;
+}
+
 // ---------------------------------------------------------------- commands
 
 void reply(const char* json) { Serial.println(json); }
@@ -441,7 +519,7 @@ void stepDemo() {
 
 void printHelp() {
   Serial.println("{\"help\":\"type a move: idle alert suspicious skeptical satisfied disappointed thinking shake nod lookback center\"}");
-  Serial.println("{\"help\":\"demo = all moves in turn | step <move> = one step per Enter | slow / normal = 1/3 speed or back | stop = hold still\"}");
+  Serial.println("{\"help\":\"demo = all moves in turn | step <move> = one step per Enter | slow / normal = 1/3 speed or back | stop = hold still | budget 150 = test the budget screen\"}");
 }
 
 bool isMove(const char* name) {
@@ -485,6 +563,11 @@ void handleWord(const char* word, const char* arg) {
     demoPlay();
   } else if (strcmp(word, "help") == 0) {
     printHelp();
+  } else if (strcmp(word, "budget") == 0) {
+    // "budget" redraws it; "budget 150" pretends $150 is left (total stays, or $600) to test the screen.
+    if (arg[0]) setBudget(atol(arg), budgetTotal > 0 ? budgetTotal : 600, "test from Serial Monitor");
+    else if (budgetKnown) setBudget(budgetLeft, budgetTotal, nullptr);
+    else drawBudget();
   } else if (isGesture(word)) {
     applyGesture(word);
   } else {
@@ -515,8 +598,8 @@ void handleLine(const char* line) {
     handleWord(word, arg);
     return;
   }
-  // Any JSON command (from the brain) stops a demo or step mode, except the many-per-second tracking ones.
-  if (strstr(line, "\"gaze\"") == nullptr && strstr(line, "\"stare\"") == nullptr) {
+  // Any JSON command (from the brain) stops a demo or step mode, except tracking and the budget screen.
+  if (strstr(line, "\"gaze\"") == nullptr && strstr(line, "\"stare\"") == nullptr && strstr(line, "\"budget\"") == nullptr) {
     demoI = -1;
     stepMode = stepWaiting = false;
   }
@@ -539,6 +622,9 @@ void handleLine(const char* line) {
     stareP = constrain(doc["stare"].as<float>(), 0.0, 1.0);
     curEyes = EYES_STARE;
     eyesDirty = true;  // no reply: sent ~10x/s during a stare
+  } else if (doc["budget"].is<JsonArray>() && doc["budget"].size() == 2) {
+    setBudget(lround(doc["budget"][0].as<float>()), lround(doc["budget"][1].as<float>()), doc["note"] | "");
+    reply("{\"ok\":true}");
   } else if (!doc["ping"].isNull()) {
     reply("{\"pong\":1}");
   } else {
@@ -582,6 +668,18 @@ void setup() {
   rightOk = rightEye.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (!leftOk) Serial.println("{\"err\":\"left eye not found\"}");
   if (!rightOk) Serial.println("{\"err\":\"right eye not found\"}");
+  TwoWire* budgetBus = i2cAnswers(Wire, BUDGET_ADDR) ? &Wire : i2cAnswers(bus1, BUDGET_ADDR) ? &bus1 : nullptr;
+  if (budgetBus) {
+    budgetScreen = new Adafruit_SSD1306(128, 64, budgetBus, -1);
+    if (!budgetScreen->begin(SSD1306_SWITCHCAPVCC, BUDGET_ADDR)) budgetScreen = nullptr;
+  }
+  if (budgetScreen) {
+    Serial.println(budgetBus == &Wire ? "{\"note\":\"budget screen found on the left eye's bus (0x3D)\"}"
+                                      : "{\"note\":\"budget screen found on the right eye's bus (0x3D)\"}");
+    drawBudget();
+  } else {
+    Serial.println("{\"note\":\"no budget screen at 0x3D (fine if it isn't wired yet)\"}");
+  }
 
   panServo.setPeriodHertz(50);
   tiltServo.setPeriodHertz(50);
@@ -606,5 +704,6 @@ void loop() {
   stepMotion();
   stepDemo();
   stepEyes();
+  stepBudget();
   delay(5);
 }

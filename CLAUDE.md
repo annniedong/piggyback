@@ -22,7 +22,8 @@ extension ────────POST /sale, /cart──►   │  sales.py: pa
                                          └──USB serial (JSON lines)──► ESP32 firmware
                                                                          ├─PWM──► 2× neck servos (pan/tilt)
                                                                          ├─I2C bus 0─► left SSD1306 OLED eye
-                                                                         └─I2C bus 1─► right SSD1306 OLED eye
+                                                                         ├─I2C bus 1─► right SSD1306 OLED eye
+                                                                         └─either bus, 0x3D─► budget OLED
 ```
 
 All HTTP/WebSocket endpoints (`/ws`, `/alert`, `/review`, `/health`, plus the `/store` demo page) live on the single `app` in `brain.py`. Don't start a second server: only one process can hold the ESP32's serial port, and every endpoint needs it.
@@ -114,6 +115,7 @@ Brain → ESP32 (USB serial, 115200 baud, one JSON object per line ending in `\n
 {"gaze": [x, y]}
 {"stare": 0.4}
 {"gesture": "shake" | "nod" | "lookback" | "center"}
+{"budget": [231, 600], "note": "-$45 Smart toaster"}
 {"ping": 1}
 ```
 
@@ -129,6 +131,7 @@ ESP32 → brain (one JSON object per line):
 - Expressions: `idle, alert, suspicious, skeptical, satisfied, disappointed, thinking`. Unknown names fall back to `idle` and reply with `err`.
 - `look` values are −1…1, with `[0, 0]` as center. The ESP32 maps them onto its own `LIMITS`, so the brain never needs servo angles.
 - `gaze` (−1…1) moves the OLED pupils toward the user; `stare` (0…1) shows stare-down eyes whose lids close as the confirmation progresses. Both are sent ~10×/s and get no reply. Any `expr` ends a stare.
+- `budget` is `[money left, monthly budget]` in whole dollars for the third OLED (the budget screen): big "$231", "LEFT THIS MONTH" (or "OVER BUDGET BY"), a gauge bar, and "of $600 budget". `note` (optional, ≤21 characters) replaces the bottom line for 6 s. The brain sends it when the ESP32 connects, after every `decision` (`-$45 Socks` when bought, `saved $45!` when put back), and after every dashboard change (`PUT /budget`, goals, waiting room).
 - The ESP32 replies right away and moves in the background. A new command interrupts the current motion.
 - The brain never waits on replies; it only logs them.
 
@@ -211,9 +214,10 @@ Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods ca
 - VS Code + PlatformIO (recommended, nothing else to install): install the PlatformIO IDE extension, File → Open Folder → `firmware/` (the folder with `platformio.ini`), then use the PlatformIO toolbar at the bottom (✓ build, → upload, plug icon = serial monitor; type `demo` or `help` there). The first build downloads the ESP32 toolchain (a few minutes; do it before the venue Wi-Fi matters). Or, or from a terminal `pio run -d firmware -t upload` and `pio device monitor -d firmware`. `firmware/platformio.ini` pins the board (`esp32dev`), libraries, and 115200 baud, so every machine builds the same thing.
 - Arduino IDE or `arduino-cli` also works on the same sketch: ESP32 board package plus libraries ArduinoJson, Adafruit SSD1306, Adafruit GFX, ESP32Servo.
 - Suggested pins (confirm for your board): pan servo GPIO 18, tilt servo GPIO 19; left eye on I2C bus 0 (SDA 21, SCL 22); right eye on I2C bus 1 (SDA 25, SCL 26). Write the final pins here once wired.
+- Budget screen: a third SSD1306 128×64 on either I2C bus (wire it in parallel with one eye: same SDA, SCL, 3.3V, GND). Both eyes already use 0x3C, so change the budget screen to 0x3D (move the resistor or bridge the jumper labelled "I2C address" on its back). At boot the firmware looks for 0x3D on both buses and prints which one it found, or "no budget screen at 0x3D".
 - Servos are driven straight from ESP32 PWM pins with ESP32Servo. MG90S servos accept the 3.3 V signal. If that's unreliable, fall back to the PCA9685 on I2C bus 0 (address 0x40, it can share the bus with the left eye).
 - `LIMITS` clamps angles (pan 0–180°; narrow it if the head hits the frame). `PRESETS` maps each expression to eyes plus a list of head steps, each an offset in degrees from where the user is (the last `look`), so turns and nods happen relative to the user: idle drifts ±10° (loops), alert snaps up, skeptical looks away and back, satisfied nods, disappointed does a slow drooping head shake, thinking sways looking up (loops). `{"gesture": ...}` plays shake/nod/lookback/center without changing the eyes (for testing in Serial Monitor). Offsets flip when the user is past center so turns go toward the middle, not into a limit.
-- The ESP32 prints what it's doing as JSON lines (`{"expression":...,"eyes":...}`, `{"move":"skeptical","step":"3/5","doing":"glance back at you","pan":90,"tilt":90,"ms":375}`, `{"move":...,"doing":"done"}`); the brain logs them as `ESP32 <` lines. In Serial Monitor you can also type plain words: an expression or gesture name, `demo` (plays every expression and gesture in turn, any brain command stops it), `step <move>` (one step per Enter, for tuning), `slow` / `normal` (every move at 1/3 speed, or back), or `help`.
+- The ESP32 prints what it's doing as JSON lines (`{"expression":...,"eyes":...}`, `{"move":"skeptical","step":"3/5","doing":"glance back at you","pan":90,"tilt":90,"ms":375}`, `{"move":...,"doing":"done"}`); the brain logs them as `ESP32 <` lines. In Serial Monitor you can also type plain words: an expression or gesture name, `demo` (plays every expression and gesture in turn, any brain command stops it), `step <move>` (one step per Enter, for tuning), `slow` / `normal` (every move at 1/3 speed, or back), `stop` (hold still, quiet), `budget 150` (pretend $150 is left, to test the budget screen), or `help`.
 - `MAX_DEG_PER_SEC` (100) caps servo speed: any step that would need more just takes longer. Motion uses smoothstep easing, stepped inside `loop()` without `delay()` so new commands interrupt it.
 - A `look` during a one-shot motion (shake, nod, look-back) waits until it finishes; a `look` cancels the looping idle drift and thinking sway. Idle drift restarts after 5 s with no `look`. The brain pauses tracking per expression (`EXPR_SECONDS` in `brain.py`) to match the step lengths, so update both when tuning.
 - Both I2C buses run at 400 kHz so full-frame eye redraws keep up with `gaze` updates; eyes redraw at most ~15 fps.
@@ -223,7 +227,7 @@ Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods ca
 
 ## Hardware
 
-- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, Logitech webcam with mic (on the laptop), JBL speaker for Piggyback's voice (connected to the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
+- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, 1× SSD1306 budget screen (address 0x3D), Logitech webcam with mic (on the laptop), JBL speaker for Piggyback's voice (connected to the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
 - Webcam goes inside the head, between or just above the OLED eyes, so looking at the eyes = looking at the camera. Take it out of its clip/stand to save weight: MG90S servos are small, so keep the camera close to the tilt axis and leave slack in the USB cable so it doesn't drag the head. Its mic is now right next to the servos, which is why the head freezes while recording.
 - Power rules: servos run from the bench supply, never from the ESP32's 5V/VIN pin; the ESP32 is powered by the laptop's USB; all grounds shared (bench supply ground ↔ ESP32 GND). OLEDs run from the ESP32's 3.3V pin.
 

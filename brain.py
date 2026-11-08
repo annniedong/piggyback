@@ -237,6 +237,10 @@ class Head:
                 break
         self.ser = ser
         log("ESP32 connected on", port)
+        try:  # the budget screen starts blank after the reset, so fill it in now
+            ser.write((json.dumps(budget_cmd()) + "\n").encode())
+        except (serial.SerialException, OSError):
+            pass
         threading.Thread(target=self._read_loop, args=(ser,), daemon=True).start()
 
     def _read_loop(self, ser):
@@ -280,6 +284,19 @@ class Head:
 
 
 head = Head()
+
+
+def budget_cmd(note: str = "") -> dict:
+    """Command for the ESP32's budget screen (the third OLED): money left and the monthly budget."""
+    profile = store.load()
+    cmd = {"budget": [round(store.remaining(profile)), round(profile["monthly_budget"])]}
+    if note:
+        cmd["note"] = note[:21]  # one line of the 128 px screen
+    return cmd
+
+
+def show_budget(note: str = ""):
+    head.send(budget_cmd(note))
 
 
 # ---------------------------------------------------------------- speech
@@ -848,6 +865,7 @@ def change_profile(fn, *args):
             fn(p, *args)
     except KeyError as e:
         raise HTTPException(404, f"not found: {e}")
+    show_budget()
     return store.summary(store.load())
 
 
@@ -1163,6 +1181,10 @@ async def ws_endpoint(ws: WebSocket):
                         store.note_purchase(p, str(msg.get("item") or (session["item"] if session else "something")),
                                             float(msg.get("price", session["price"] if session else 0)),
                                             session["category"] if session else "other")
+                item = str(msg.get("item") or (session["item"] if session else "")) or "it"
+                price = float(msg.get("price", session["price"] if session else 0) or 0)
+                note = f"-${price:.0f} {item}" if msg.get("outcome") == "completed" else f"saved ${price:.0f}!"
+                await asyncio.to_thread(show_budget, note)
                 bought_anyway = session and msg.get("outcome") == "completed" and session["verdict"] in ("timer", "escalate")
                 if session:
                     session["done"] = True
