@@ -14,6 +14,9 @@ CAMERA_INDEX = os.getenv("CAMERA_INDEX")  # set a number to skip name matching
 # Wireless camera: a video stream URL (e.g. the Logitech on a Pi running ustreamer,
 # http://pig-cam.local:8080/stream). When set, CAMERA_NAME and CAMERA_INDEX are ignored.
 CAMERA_URL = os.getenv("CAMERA_URL")
+# The webcam only fits on the pig's head on its side: every frame is turned this many degrees
+# counterclockwise (0, 90, 180, 270) before anything reads it, so faces are upright.
+CAMERA_ROTATE = int(os.getenv("CAMERA_ROTATE", "0")) % 360
 # Webcam MJPEG often has odd APP segments; FFmpeg then prints "unable to decode APP fields"
 # for every frame even though it decodes fine. -8 = quiet. Must be set before cv2 loads.
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
@@ -43,6 +46,14 @@ def list_cameras() -> list:
     devices = (list(AV.AVCaptureDevice.devicesWithMediaType_(AV.AVMediaTypeVideo))
                + list(AV.AVCaptureDevice.devicesWithMediaType_(AV.AVMediaTypeMuxed)))
     return [d.localizedName() for d in sorted(devices, key=lambda d: d.uniqueID())]
+
+
+def upright(frame):
+    """The frame turned by CAMERA_ROTATE, so a camera mounted on its side still gives upright faces."""
+    import cv2
+
+    turns = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_CLOCKWISE}
+    return cv2.rotate(frame, turns[CAMERA_ROTATE]) if CAMERA_ROTATE in turns else frame
 
 
 def pick_camera():
@@ -157,7 +168,8 @@ class Vision:
                 return
             index, name = pick_camera()
             self.state["camera"] = name
-            print(f"Camera: {name} (index {index})", flush=True)
+            print(f"Camera: {name} (index {index})"
+                  + (f", turned {CAMERA_ROTATE}° counterclockwise" if CAMERA_ROTATE else ""), flush=True)
             cap = cv2.VideoCapture(index)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -196,6 +208,7 @@ class Vision:
             if not ok:
                 time.sleep(0.05)
                 continue
+            frame = upright(frame)
             n += 1
             if n % 15 == 0:  # near 0 means black frames (lens covered, wrong camera, or no permission)
                 self.state["brightness"] = round(float(frame.mean()), 1)

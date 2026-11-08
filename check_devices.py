@@ -14,7 +14,7 @@ import sys
 import time
 
 import brain
-from vision import list_cameras, pick_camera, vision
+from vision import CAMERA_ROTATE, list_cameras, pick_camera, upright, vision
 
 
 def probe_cameras():
@@ -38,8 +38,10 @@ def probe_cameras():
               + ("  <- black frames" if frame.mean() < 10 else ""))
         if "--snapshot" in sys.argv:
             path = f"/tmp/piggyback_camera{i}.jpg"
-            cv2.imwrite(path, frame)
-            print(f"    saved {path} (open it to see what this camera sees)")
+            pig_camera = i == pick_camera()[0]
+            cv2.imwrite(path, upright(frame) if pig_camera else frame)
+            turned = f", turned {CAMERA_ROTATE}° counterclockwise" if pig_camera and CAMERA_ROTATE else ""
+            print(f"    saved {path}{turned} (open it to see what this camera sees)")
 
 
 def check_camera(seconds=12):
