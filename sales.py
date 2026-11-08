@@ -372,7 +372,7 @@ async def read_cart(req: CartCheck):
 # site's checkout starts, so Piggyback can argue with it.
 
 SEEN_FOR_S = 30 * 60  # forget a site's signals after 30 minutes
-_seen: dict[str, dict] = {}  # site -> {"ad", "sale", "urgency", "cart_count", "cart_total", "at"}
+_seen: dict[str, dict] = {}  # site -> {"ad", "sponsored", "retargeted", "upsells", "sale", "urgency", "cart_*", "at"}
 _visits = {"day": "", "count": 0}
 
 
@@ -389,10 +389,17 @@ def note(url: str, **facts):
         _seen.setdefault(site, {}).update(facts, at=time.time())
 
 
-def note_alert(kind: str, url: str, value: float | None = None, count: int | None = None):
+def note_alert(kind: str, url: str, value: float | None = None, count: int | None = None, detail: str | None = None):
     """Signals from the extension (and bot/) via POST /alert. Nothing is spoken."""
     if kind == "ad_referral":
-        note(url, ad=True)
+        note(url, ad=detail or "an ad")
+    elif kind == "sponsored":
+        note(url, sponsored=detail or "a sponsored listing")
+    elif kind == "retargeted":
+        note(url, retargeted=(detail or "store", int(value or 0)))
+    elif kind == "upsell":
+        upsells = _seen.get(site_of(url), {}).get("upsells", [])
+        note(url, upsells=upsells + [detail or "a suggested add-on"])
     elif kind in ("shopping_visit", "shopping_visits") and value is not None:
         _visits.update(day=str(date.today()), count=int(value))
     elif kind == "cart":
@@ -408,8 +415,20 @@ def seen_on(url: str | None) -> str:
     lines = []
     s = _seen.get(site_of(url))
     if s and time.time() - s["at"] < SEEN_FOR_S:
-        if s.get("ad"):
-            lines.append("They arrived on this site by clicking an ad.")
+        if s.get("sponsored"):
+            lines.append(f"They got here by clicking {s['sponsored']}: the seller paid to be placed at the top.")
+        elif s.get("ad"):
+            ad = s["ad"] if isinstance(s["ad"], str) else "an ad"
+            lines.append(f"They arrived on this site by clicking {ad}.")
+        if s.get("retargeted"):
+            what, days = s["retargeted"]
+            when = "earlier today" if days == 0 else "yesterday" if days == 1 else f"{days} days ago"
+            lines.append(f"That ad brought them back to a {what} they'd already looked at {when}: "
+                         "it's a retargeting ad that followed them around the web.")
+        if s.get("upsells"):
+            n = len(s["upsells"])
+            lines.append(f"They added {n} suggested add-on{'s' if n != 1 else ''} from sections like "
+                         f"\"{s['upsells'][-1]}\".")
         if s.get("sale"):
             lines.append(f"The site is pushing an offer: {s['sale']}"
                          + (", with time pressure (ends soon, countdown, or low stock)." if s.get("urgency") else "."))

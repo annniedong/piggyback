@@ -1,7 +1,10 @@
 // Piggyback background: watches shopping in your normal Chrome, silently. What it notices goes to
 // brain.py as context, and Piggyback brings it up out loud at checkout ("An ad brought you here").
 //
-//   ad_referral     arrived at a shopping site from an ad (gclid / fbclid / msclkid)
+//   ad_referral     arrived at a shopping site from an ad (click ids or paid utm tags; detail = which ad)
+//   sponsored       arrived by clicking a "Sponsored" / "Ad" search result (adwatch.js, or Amazon's links)
+//   retargeted      an ad brought them back to a product or store they'd already visited (value = days)
+//   upsell          added an item from a "Frequently bought together"-style section (detail = section)
 //   shopping_visit  shopping pages visited today (value = count)
 //   cart            items and total in the cart (count, value = total)
 //   sales           sale.js sends offer text to the brain's AI (/sale), which remembers what it found
@@ -9,32 +12,30 @@
 // Works on any shopping site: shop.js decides whether a page is a shop and reports visits;
 // cart.js reads the cart on cart/bag pages. Nothing here speaks.
 
+importScripts("adsignals.js"); // PiggybackAds.adSource
+
 const ALERT_URL = "http://localhost:8000/alert";
-const AD_PARAMS = ["gclid", "fbclid", "msclkid"];
+const RETARGET_AFTER_MS = 60 * 60 * 1000;   // an ad bringing you back after 1 h+ counts as retargeting
+const SPONSORED_MATCH_MS = 10 * 60 * 1000;  // a sponsored click counts for its site's visits for 10 min
+const MAX_REMEMBERED = 300;                  // products / stores remembered for retargeting
 
 const lastUrl = new Map();     // tabId -> last URL we counted
 
 // ------------------------------------------------------------------ helpers
 
-function isAdReferral(url) {
-  try {
-    const params = new URL(url).searchParams;
-    return AD_PARAMS.some((p) => params.has(p));
-  } catch {
-    return false;
-  }
-}
+const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; } };
+const productKey = (url) => { try { const u = new URL(url); return hostOf(url) + u.pathname.replace(/\/ref=.*$/, ""); } catch { return ""; } };
 
 function today() {
   return new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local time
 }
 
-async function postToBrain(type, website, value = null, count = null) {
+async function postToBrain(type, website, value = null, count = null, detail = null) {
   try {
     await fetch(ALERT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, website, value, count }),
+      body: JSON.stringify({ type, website, value, count, detail }),
     });
   } catch {
     // Brain is off; nothing to tell.
@@ -43,21 +44,55 @@ async function postToBrain(type, website, value = null, count = null) {
 
 // ------------------------------------------------------------------ visits
 
-async function onVisit(url, cameFromAd) {
+async function onVisit(url, landingAd) {
   const day = today();
-  const stored = await chrome.storage.local.get(["visitDay", "visitCount"]);
+  const stored = await chrome.storage.local.get(["visitDay", "visitCount", "seenProducts", "seenHosts", "pendingSponsored"]);
   const count = (stored.visitDay === day ? stored.visitCount || 0 : 0) + 1;
   await chrome.storage.local.set({ visitDay: day, visitCount: count });
-
   postToBrain("shopping_visit", url, count);
-  if (cameFromAd || isAdReferral(url)) postToBrain("ad_referral", url);
+
+  const ad = landingAd || PiggybackAds.adSource(url);
+  const host = hostOf(url), key = productKey(url), now = Date.now();
+  const pending = stored.pendingSponsored;
+  if (ad && ad.kind === "sponsored") {
+    postToBrain("sponsored", url, null, null, ad.source);
+  } else if (pending && pending.host === host && now - pending.at < SPONSORED_MATCH_MS) {
+    postToBrain("sponsored", url, null, null, `a sponsored result on ${pending.from}`);
+  } else if (ad) {
+    postToBrain("ad_referral", url, null, null, ad.source);
+  }
+
+  // Retargeting: an ad (not a search they ran) brought them back to something they'd already seen.
+  const products = stored.seenProducts || {}, hosts = stored.seenHosts || {};
+  if (ad) {
+    const days = (since) => Math.max(0, Math.round((now - since) / 86400000));
+    if (products[key] && now - products[key] > RETARGET_AFTER_MS) {
+      postToBrain("retargeted", url, days(products[key]), null, "product");
+    } else if (hosts[host] && now - hosts[host] > RETARGET_AFTER_MS) {
+      postToBrain("retargeted", url, days(hosts[host]), null, "store");
+    }
+  }
+  products[key] = products[key] || now;
+  hosts[host] = hosts[host] || now;
+  const newest = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, MAX_REMEMBERED));
+  await chrome.storage.local.set({ seenProducts: newest(products), seenHosts: newest(hosts) });
+}
+
+// adwatch.js: a click on a result labeled "Sponsored" / "Ad". The landing page's visit (onVisit)
+// is matched to it by host, since ad links often bounce through a redirect first.
+async function onSponsoredClick(from, to) {
+  const ad = PiggybackAds.adSource(to);
+  let host = hostOf(to);
+  if (/(^|\.)google\./.test(host) || /(^|\.)bing\./.test(host)) host = ""; // ad redirect: gclid/msclkid covers it
+  if (!host) return;
+  await chrome.storage.local.set({ pendingSponsored: { host, from: hostOf(from), at: Date.now(), source: ad && ad.source } });
 }
 
 // shop.js sends this once per URL when it decides the page is a shopping page.
-function onShopPage(tabId, url, cameFromAd) {
+function onShopPage(tabId, url, landingAd) {
   if (lastUrl.get(tabId) === url) return;
   lastUrl.set(tabId, url);
-  onVisit(url, cameFromAd);
+  onVisit(url, landingAd);
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => lastUrl.delete(tabId));
@@ -121,7 +156,11 @@ async function onSalePage(page) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.kind === "visit" && sender.tab) {
-    onShopPage(sender.tab.id, msg.url, msg.cameFromAd);
+    onShopPage(sender.tab.id, msg.url, msg.ad || null);
+  } else if (msg.kind === "sponsored_click") {
+    onSponsoredClick(msg.from, msg.to);
+  } else if (msg.kind === "upsell") {
+    postToBrain("upsell", msg.url, null, null, msg.label);
   } else if (msg.kind === "cart" && sender.tab) {
     if (msg.text) onCartText(sender.tab.id, msg);
     else onCart(sender.tab.id, msg);

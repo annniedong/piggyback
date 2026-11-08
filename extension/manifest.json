@@ -35,6 +35,8 @@
         "https://*/*"
       ],
       "js": [
+        "adsignals.js",
+        "adwatch.js",
         "shop.js",
         "cart.js",
         "sale.js"

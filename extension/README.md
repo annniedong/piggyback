@@ -29,12 +29,16 @@ After editing extension files, click the reload icon on the Piggyback card in
 
   | Signal | When |
   |---|---|
-  | `ad_referral` | arrived from an ad (`gclid` / `fbclid` / `msclkid`), e.g. <http://localhost:8000/store/?gclid=demo> |
+  | `ad_referral` | arrived from an ad: click ids (`gclid`, `msclkid`, `ttclid`, `fbclid`, ...) or paid `utm_medium` (`cpc`, `paid_social`, ...), e.g. <http://localhost:8000/store/?gclid=demo> |
+  | `sponsored` | clicked a result labeled "Sponsored" / "Ad" / "Promoted" / "Ad by …" (`adwatch.js`), or an Amazon sponsored link (`/sspa/click`, `_sspa`, `-spons`) |
+  | `retargeted` | an ad brought them back to a product or store first visited over an hour earlier (`value` = days) |
+  | `upsell` | "Add to cart" inside "Frequently bought together", "Customers also bought", "Complete the look", ... |
   | `shopping_visit` | each shopping page, with today's count |
   | `cart` | the cart's item count and total |
   | sale | `/sale` finds a real sale, coupon, or countdown (the brain remembers it itself) |
 
-  The checkout message includes the page `url`, so the brain matches signals from the same site
+  Link and label rules live in `adsignals.js` (tests: `node extension/test_adsignals.js`); in DevTools,
+  `piggybackAdCheck(element)` shows what a click there would report. The checkout message includes the page `url`, so the brain matches signals from the same site
   (kept for 30 minutes).
 
   **Works on any shopping site.** `shop.js` runs on every page and decides whether it's a shop:

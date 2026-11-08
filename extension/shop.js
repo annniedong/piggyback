@@ -20,7 +20,7 @@
 
   // Captured at document_start, before stores strip ad parameters from the URL.
   const landingUrl = location.href;
-  const cameFromAd = /[?&](gclid|fbclid|msclkid)=/i.test(landingUrl);
+  const landingAd = globalThis.PiggybackAds ? PiggybackAds.adSource(landingUrl) : null; // see adsignals.js
 
   let verdict = null; // { shop: bool, score, reasons } for the current URL
   let verdictUrl = "";
@@ -80,9 +80,9 @@
     verdictUrl = ""; // re-score: the page may have rendered more since last time
     if (!window.piggybackIsShop() || reported === location.href) return;
     reported = location.href;
-    const msgAd = cameFromAd && !adSent;
+    const ad = adSent ? null : landingAd;
     try { chrome.runtime.sendMessage({ kind: "visit", url: location.href, reasons: verdict.reasons,
-                                       cameFromAd: msgAd }); } catch {}
+                                       cameFromAd: !!ad, ad }); } catch {}
     adSent = true; // only the first shopping page of this page load counts as "from an ad"
   }
 

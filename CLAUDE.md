@@ -70,11 +70,11 @@ Brain → extension (the overlay shows `question` and `verdict`; it doesn't show
 Browser bot → brain (HTTP `POST http://localhost:8000/alert`, returns `{"ok": true}`):
 
 ```json
-{"type": "shopping_visit" | "ad_referral" | "cart" | "over_budget" | "cart_count" | "shopping_visits",
- "website": "https://www.amazon.com/...", "value": 182.5, "count": 7}
+{"type": "shopping_visit" | "ad_referral" | "sponsored" | "retargeted" | "upsell" | "cart" | "over_budget" | "cart_count" | "shopping_visits",
+ "website": "https://www.amazon.com/...", "value": 182.5, "count": 7, "detail": "a Google ad"}
 ```
 
-Signals are silent: nothing is spoken and the head doesn't move. `sales.py` keeps them per site for 30 minutes (`ad_referral`; `cart` with `count` and `value` = total; `shopping_visit` with `value` = pages today), along with any sale `/sale` found. When a checkout arrives with a `url` on that site, the AI prompt gets a "what you noticed on the page" section, and Piggyback brings it up ("An ad brought you here and the countdown is rushing you"). These are reasons to question, not to refuse; a real need still wins.
+Signals are silent: nothing is spoken and the head doesn't move. `sales.py` keeps them per site for 30 minutes (`ad_referral` with `detail` = which ad; `sponsored` = clicked a paid search result; `retargeted` with `detail` = product/store and `value` = days since first visit; `upsell` with `detail` = the section; `cart` with `count` and `value` = total; `shopping_visit` with `value` = pages today), along with any sale `/sale` found. Detection rules are in `extension/adsignals.js`. When a checkout arrives with a `url` on that site, the AI prompt gets a "what you noticed on the page" section, and Piggyback brings it up ("An ad brought you here and the countdown is rushing you"). These are reasons to question, not to refuse; a real need still wins.
 
 Budget review (HTTP, extension button → `GET http://localhost:8000/review`, add `?speak_it=true` to have Piggyback say the summary out loud):
 

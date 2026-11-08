@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 import store
 import sales
@@ -99,9 +99,11 @@ Reply with JSON only: {"line": str, "expression": str, "verdict": str, "need": s
   can wait, whether a cheaper option would do. Don't ask about other people's finances.
   If they're saving for a goal, make them weigh the purchase against it. If they've tried to buy this
   before, or said something different last time, call it out.
-  What you noticed on the page (an ad brought them, a sale or countdown, a big cart, lots of shopping
+  What you noticed on the page (an ad or sponsored listing brought them, an ad that followed them around
+  the web, add-ons from "frequently bought together", a sale or countdown, a big cart, lots of shopping
   today) are classic impulse pushes: bring them up and make them say if they'd buy it without the push.
-  They're reasons to question, not reasons to refuse; a real need still wins.
+  You can explain the trick in a few words (sellers pay for every click; retargeting ads follow you after
+  you look at something). They're reasons to question, not reasons to refuse; a real need still wins.
 - The user answers out loud while looking you in the eyes, and the prompt says how their eye contact went.
   Holding your gaze while arguing shows conviction; looking away is a weak sign worth teasing. Still judge
   mainly on their reasons, not on eye contact alone.
@@ -665,17 +667,19 @@ app.include_router(sales_router)
 
 
 class ShoppingAlert(BaseModel):
-    type: Literal["shopping_visit", "ad_referral", "cart", "over_budget", "cart_count", "shopping_visits"]
+    type: Literal["shopping_visit", "ad_referral", "sponsored", "retargeted", "upsell", "cart",
+                  "over_budget", "cart_count", "shopping_visits"]
     website: HttpUrl
-    value: float | None = None  # visits today, or the cart total
+    value: float | None = None  # visits today, the cart total, or days since a retargeted visit
     count: int | None = None    # cart item count
+    detail: str | None = Field(None, max_length=120)  # which ad, "product"/"store", or the upsell section
 
 
 @app.post("/alert")
 def shopping_alert(alert: ShoppingAlert):
     """Browsing signals from the extension. Silent: Piggyback brings them up at checkout instead."""
     log("Browser signal:", alert.model_dump(mode="json"))
-    sales.note_alert(alert.type, str(alert.website), alert.value, alert.count)
+    sales.note_alert(alert.type, str(alert.website), alert.value, alert.count, alert.detail)
     return {"ok": True}
 
 
