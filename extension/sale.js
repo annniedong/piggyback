@@ -4,6 +4,8 @@
 
 (() => {
   const OFFER = /(\d{1,2}\s*%\s*off|\bsale\b|clearance|coupon|promo|\bcode\b|\bdeal\b|discount|save \$?\d|bogo|buy one|flash|limited time|markdown|was \$|ends (today|tonight|soon))/i;
+  // Same rule as cart.js: never read checkout / payment / account pages (addresses, card fields).
+  const PRIVATE_PATH = /\/(checkout|payment|billing|shipping|account|login|signin|register)(\/|$|\.|\?)/i;
   const STRUCK_SEL = "s, del, strike, [class*='strike' i], [class*='was-price' i], [class*='original' i], [class*='compare' i], [class*='list-price' i]";
 
   function collect() {
@@ -26,6 +28,7 @@
   let lastUrl = "";
   function check() {
     if (location.href === lastUrl) return;
+    if (PRIVATE_PATH.test(location.pathname)) return;
     if (!window.piggybackIsShop || !window.piggybackIsShop()) return; // only shopping pages
     const page = collect();
     if (!page.keyword_lines.length && !page.struck_prices.length) return; // nothing offer-like

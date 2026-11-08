@@ -143,7 +143,8 @@ async def ask_gemini(prompt: str, system: str = SYSTEM, schema: dict = SCHEMA) -
         key = os.getenv("GEMINI_API_KEY_WEB")
         if not key:
             raise RuntimeError("GEMINI_API_KEY_WEB isn't set, so page reading uses local checks only")
-        _client = genai.Client(api_key=key)  # reused, so each check skips connection setup
+        # vertexai=False: the Gemini API with this key, even though GOOGLE_GENAI_USE_VERTEXAI is set for the chat.
+        _client = genai.Client(api_key=key, vertexai=False)  # reused, so each check skips connection setup
     resp = await _client.aio.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
