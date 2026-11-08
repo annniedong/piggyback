@@ -71,7 +71,7 @@ QUESTIONS_BY_TIER = {"easy": 2, "close": 3, "over": 3}
 LOOK_AWAY_GRACE = float(os.getenv("LOOK_AWAY_GRACE", "0.6"))  # seconds of looking away that breaks an answer
 
 HERE = Path(__file__).parent
-DECISIONS_FILE = HERE / "decisions.jsonl"
+DECISIONS_FILE = Path(os.getenv("DECISIONS_FILE", HERE / "decisions.jsonl"))  # tests point this elsewhere
 
 EXPRESSIONS = ["idle", "alert", "suspicious", "skeptical", "satisfied", "disappointed", "thinking"]
 # How long tracking waits after an expression so its head turns can play (matches the steps in pig_eyes.ino).
