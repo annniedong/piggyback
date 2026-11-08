@@ -1245,5 +1245,10 @@ async def ws_endpoint(ws: WebSocket):
         log("Bot disconnected")
         if session:
             session["done"] = True
-        tracking["session"] = None
-        await head.expr("idle")
+        if tracking["session"] is session:  # don't end a checkout that started on another connection
+            tracking["session"] = None
+        # The extension closes ~0.3 s after a decision: let "You went for it anyway" and its head shake finish.
+        await done_speaking()
+        await asyncio.sleep(min(max(tracking["paused_until"] - time.time(), 0), 6))
+        if tracking["session"] is None:
+            await head.expr("idle")
