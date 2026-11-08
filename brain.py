@@ -50,6 +50,7 @@ END_PAUSE = float(os.getenv("END_PAUSE", "0.8"))  # seconds of quiet that end a 
 TIMER_SECONDS = int(os.getenv("TIMER_SECONDS", "60"))
 LISTEN = os.getenv("LISTEN", "1") == "1"  # hear spoken answers on the laptop mic
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+SPEAKER = os.getenv("SPEAKER", "jbl")  # Piggyback's voice: the first audio output whose name contains this
 MIC_DEVICE = os.getenv("MIC_DEVICE", "logitech")  # picked by name so iPhone/AirPods mics can't take over
 MAX_LISTEN_SECONDS = float(os.getenv("MAX_LISTEN_SECONDS", "8"))
 NO_SPEECH_SECONDS = float(os.getenv("NO_SPEECH_SECONDS", "6"))
@@ -133,6 +134,9 @@ RESPONSE_SCHEMA = {
     "required": ["line", "expression", "verdict", "need"],
     "additionalProperties": False,
 }
+
+NUDGE_LINE = "Take your time. I'm listening."
+ACKS = ["Hmm.", "Okay.", "Mm-hm.", "Right.", "Interesting."]  # said right after an answer is heard
 
 DEFAULT_QUESTION = {"line": "Hold on. Do you actually need this, or do you just want it?", "expression": "suspicious", "verdict": "none"}
 DEFAULT_VERDICT = {"line": "I can't decide, so you wait. Put it back for a minute.", "expression": "skeptical", "verdict": "timer"}
@@ -278,6 +282,30 @@ head = Head()
 # ---------------------------------------------------------------- speech
 
 speech_proc = None
+_speaker = {"checked": 0.0, "id": None, "name": "system default"}
+
+
+def audio_outputs() -> list[tuple[str, str]]:
+    """(id, name) of every audio output, from `say -a ?` (lines like "   94 MacBook Pro Speakers")."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["say", "-a", "?"], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [tuple(line.strip().split(" ", 1)) for line in out.splitlines() if line.strip()[:1].isdigit()]
+
+
+def pick_speaker() -> tuple[str | None, str]:
+    """(id, name) of the first output whose name contains SPEAKER, else the system default (id None).
+    Re-checked every 30 s, so a speaker that connects or reconnects (new id) is picked up."""
+    if time.time() - _speaker["checked"] > 30:
+        found = next(((i, n) for i, n in audio_outputs() if SPEAKER and SPEAKER.lower() in n.lower()),
+                     (None, "system default"))
+        if found[1] != _speaker["name"] or not _speaker["checked"]:
+            log(f"Speaker: {found[1]}" + ("" if found[0] else f" (no output named like {SPEAKER!r})"))
+        _speaker.update(checked=time.time(), id=found[0], name=found[1])
+    return _speaker["id"], _speaker["name"]
 
 
 async def speak(line: str):
@@ -286,7 +314,9 @@ async def speak(line: str):
     log("🐷 Piggyback says:", line)
     if speech_proc and speech_proc.returncode is None:
         speech_proc.terminate()
-    args = ["say", "-r", str(SPEECH_RATE)] + (["-v", VOICE] if VOICE else []) + [line]
+    speaker, _ = pick_speaker()
+    args = (["say", "-r", str(SPEECH_RATE)] + (["-v", VOICE] if VOICE else [])
+            + (["-a", speaker] if speaker else []) + [line])
     try:
         speech_proc = await asyncio.create_subprocess_exec(*args)
     except FileNotFoundError:
@@ -435,7 +465,8 @@ _gemini_no_thinking = set()  # models that rejected the thinking setting
 
 
 async def ask_gemini(prompt: str, image: bytes | None = None, system: str = SYSTEM_PROMPT,
-                     schema: dict = RESPONSE_SCHEMA) -> str:
+                     schema: dict = RESPONSE_SCHEMA, fast: bool = False) -> str:
+    """fast: one quick line where speed beats depth (add-to-bag remarks): use the lighter model only."""
     global _gemini
     from google import genai
     from google.genai import errors, types
@@ -458,6 +489,8 @@ async def ask_gemini(prompt: str, image: bytes | None = None, system: str = SYST
         )
 
     models = [GEMINI_MODEL] + ([GEMINI_FALLBACK_MODEL] if GEMINI_FALLBACK_MODEL not in ("", GEMINI_MODEL) else [])
+    if fast and GEMINI_FALLBACK_MODEL:
+        models = [GEMINI_FALLBACK_MODEL]
     for i, model in enumerate(models):
         for thinking in ((False,) if model in _gemini_no_thinking else (True, False)):
             try:
@@ -696,6 +729,62 @@ def shopping_alert(alert: ShoppingAlert):
     return {"ok": True}
 
 
+class AddedToBag(BaseModel):
+    website: HttpUrl
+    item: str = Field("something", max_length=120)
+    price: float | None = Field(None, ge=0)
+
+
+REMARK_PROMPT = """You are Piggyback, a robot piggy bank: warm, playful, a little cheeky. The user just put
+something in their shopping bag. Say ONE quick spoken line, under 12 words, reacting to it, and hint that
+you'll talk about it at checkout. Don't ask a question they need to answer yet. No lecture, no emoji.
+Reply with JSON: line, expression (one of idle, alert, suspicious, skeptical, satisfied, disappointed, thinking)."""
+
+REMARK_SCHEMA = {
+    "type": "object",
+    "properties": {"line": {"type": "string"}, "expression": {"type": "string", "enum": EXPRESSIONS}},
+    "required": ["line", "expression"],
+    "additionalProperties": False,
+}
+
+REMARK_LINES = ["Ooh, into the bag. We'll talk at checkout.", "I saw that. We'll chat at checkout.",
+                "Noted. Save some arguments for checkout."]
+_last_remark = 0.0
+
+
+async def quick_remark(added: AddedToBag) -> dict:
+    default = {"line": random.choice(REMARK_LINES), "expression": "suspicious"}
+    if LLM_PROVIDER != "gemini":
+        return default
+    remaining = store.remaining(store.load())
+    price = f" for ${added.price:,.2f}" if added.price else ""
+    prompt = f"They added: {added.item}{price}. ${remaining:.0f} left in this month's budget."
+    try:
+        text = await asyncio.wait_for(ask_gemini(prompt, system=REMARK_PROMPT, schema=REMARK_SCHEMA, fast=True), 2.5)
+    except Exception as e:
+        log("Quick remark fell back to a canned line:", repr(e))
+        return default
+    reply = parse_reply(text, {**default, "verdict": "none"})
+    return {"line": reply["line"], "expression": reply["expression"]}
+
+
+@app.post("/added")
+async def added_to_bag(added: AddedToBag):
+    """Something went into the bag: one quick line out loud now; the argument waits for checkout."""
+    global _last_remark
+    log("Added to bag:", added.model_dump(mode="json"))
+    sales.note_added(str(added.website), added.item, added.price)
+    session = tracking["session"]
+    if (session and not session["done"]) or time.time() - _last_remark < 5:
+        return {"ok": True, "line": None}  # mid-argument, or a double click
+    _last_remark = time.time()
+    await head.expr("alert")
+    remark = await quick_remark(added)
+    await head.expr(remark["expression"])
+    await speak(remark["line"])
+    return {"ok": True, "line": remark["line"]}
+
+
 @app.get("/review")
 async def review(speak_it: bool = False):
     stats = spending_stats()
@@ -724,7 +813,7 @@ async def review(speak_it: bool = False):
 @app.get("/health")
 def health():
     return {"ok": True, "llm": LLM_PROVIDER, "listening": LISTEN, "esp32": head.connected(),
-            "vision": vision.state["running"], "camera": vision.state["camera"],
+            "vision": vision.state["running"], "camera": vision.state["camera"], "speaker": pick_speaker()[1],
             "store": store.STORE, "remaining": store.remaining(store.load())}
 
 
@@ -898,6 +987,7 @@ async def stare_to_confirm() -> bool:
 async def say_and_show(ws: WebSocket, reply: dict, msg: dict):
     await head.expr(reply["expression"])
     await ws.send_json(msg)
+    await done_speaking()  # let a short "Hmm." finish instead of cutting it off
     await speak(reply["line"])
 
 
@@ -967,6 +1057,7 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
         if session["done"] or session["answered"] >= turn:
             return
         verified = eye_contact_available() and vision.state["present"]
+        nudged = False
         while True:
             gate = lambda: True
             t_wait = time.time()
@@ -982,8 +1073,17 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
                 return
             if verified:
                 log(f"Timing: waited {time.time() - t_wait:.1f}s for eye contact")
+            await ws.send_json({"type": "listening", "seconds": NO_SPEECH_SECONDS})
             text, broke = await asyncio.to_thread(listen, gate)
             log("Heard:", repr(text), "(looked away)" if broke else "")
+            if not text and not broke and not nudged:
+                # They may just be thinking: one gentle nudge, then silence counts as no answer.
+                nudged = True
+                await ws.send_json({"type": "nudge", "line": NUDGE_LINE})
+                await head.expr("thinking")
+                await speak(NUDGE_LINE)
+                await done_speaking()
+                continue
             if not broke:
                 break
             session["strikes"] += 1
@@ -998,6 +1098,8 @@ async def listen_for_answer(ws: WebSocket, session: dict, turn: int):
             await handle_answer(ws, session, turn, "[looked away mid-answer twice; argument forfeited]")
             return
         await ws.send_json({"type": "heard", "text": text})
+        if text:
+            await speak(random.choice(ACKS))  # covers the AI's ~2 s so it doesn't feel like dead air
         await handle_answer(ws, session, turn, text or "(no answer)", verified=verified)
     except Exception as e:
         log("Listening failed, waiting for a typed answer instead:", repr(e))

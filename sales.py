@@ -390,6 +390,14 @@ def note(url: str, **facts):
         _seen.setdefault(site, {}).update(facts, at=time.time())
 
 
+def note_added(url: str, item: str, price: float | None):
+    """Items put in the bag on this site (POST /added), so Piggyback can bring them up at checkout."""
+    site = site_of(url)
+    if site:
+        added = _seen.get(site, {}).get("added", [])
+        note(url, added=(added + [f"{item} (${price:,.2f})" if price else item])[-5:])
+
+
 def note_alert(kind: str, url: str, value: float | None = None, count: int | None = None, detail: str | None = None):
     """Signals from the extension (and bot/) via POST /alert. Nothing is spoken."""
     if kind == "ad_referral":
@@ -426,6 +434,8 @@ def seen_on(url: str | None) -> str:
             when = "earlier today" if days == 0 else "yesterday" if days == 1 else f"{days} days ago"
             lines.append(f"That ad brought them back to a {what} they'd already looked at {when}: "
                          "it's a retargeting ad that followed them around the web.")
+        if s.get("added"):
+            lines.append("They put these in the bag on this site: " + "; ".join(s["added"]) + ".")
         if s.get("upsells"):
             n = len(s["upsells"])
             lines.append(f"They added {n} suggested add-on{'s' if n != 1 else ''} from sections like "

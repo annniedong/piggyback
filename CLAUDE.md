@@ -36,7 +36,7 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 - `vision.py` (laptop): reads the webcam in the pig's head; tracks the face and whether the user is looking at the eyes. Downloads `models/face_landmarker.task` on first run.
 - `store.py` (laptop, or Cloud Run later): the user's profile: budget, purchases, savings goals, the waiting room, and past arguments. `STORE=json` keeps it in `profile.json` (migrated automatically from the old `budget.json`); `STORE=firestore` keeps it in Firestore document `profiles/<PROFILE_ID>` (needs `pip install google-cloud-firestore`; not tested yet). Same functions either way.
 - `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget. Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
-- `check_devices.py` (laptop): checks the camera, mic, and Gemini before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
+- `check_devices.py` (laptop): checks the camera, mic, speaker, and Gemini before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
 - `test_client.py` (laptop): pretends to be the extension for testing the brain (`--auto` canned answers, `--voice` answer out loud; `BRAIN_URL` for another port).
 - `extension/` (Chrome, Manifest V3): holds "Place order" on the demo store and runs the checkout conversation (`content.js`), Budget review popup (`popup.html`), browsing alerts to `/alert` (`background.js`). Load unpacked; see `extension/README.md`.
 - `store/` (served by the brain at http://localhost:8000/store/): fake demo store; its Place order button carries `data-piggyback="place-order"` with `data-item`, `data-price`, `data-category`.
@@ -55,12 +55,22 @@ Extension → brain (WebSocket `ws://localhost:8000/ws`):
 
 - `checkout`: sent when the user clicks Place order (or similar). `price` is a number in dollars. `url` (optional) is the checkout page, used to match what the extension noticed on that site.
 - `decision`: `completed` when the user goes ahead with the order, `abandoned` when they put it back.
-- `answer`: optional. Spoken answers are heard by the brain itself; typed answers are for testing or if the mic fails.
+- `answer`: optional. Spoken answers are heard by the brain itself; typed answers are for testing or if the mic fails. The overlay hides its text box behind a "Can't talk? Type instead" link, since typed answers never count as eye contact.
 
-Brain → extension (the overlay shows `question` and `verdict`; it doesn't show `heard`, `confirm`, or `looked_away` yet):
+Add to bag (HTTP `POST http://localhost:8000/added`, from `background.js` when an "Add to cart/bag" button is clicked):
+
+```json
+{"website": "https://...", "item": "Wool Twill Pants", "price": 1200}
+```
+
+The item goes in the bag right away; Piggyback turns to `alert` and says one quick line out loud (Gemini on `GEMINI_FALLBACK_MODEL`, about 2 s, canned line after 2.5 s), like "Twelve-hundred bucks for pants? We'll chat at checkout." The argument still waits for checkout, where the AI is told what went in the bag. Skipped during an argument and within 5 s of the last remark.
+
+Brain → extension (the overlay, a small card in the bottom-right corner, shows all of these):
 
 ```json
 {"type": "question", "line": "...", "expression": "suspicious"}
+{"type": "listening", "seconds": 6}
+{"type": "nudge", "line": "Take your time. I'm listening."}
 {"type": "heard", "text": "I need it for my cooking class"}
 {"type": "confirm", "seconds": 3, "line": "Look me in the eyes for 3 seconds if you're sure."}
 {"type": "looked_away", "strikes": 1, "heard": "For my"}
@@ -129,7 +139,8 @@ ESP32 → brain (one JSON object per line):
    - First break: "You looked away. Look at me and say that again." and they redo that answer.
    - Second break: "You looked away twice, so let's pause this one for a minute." The argument ends, the verdict comes right away, and it can't be better than `timer` (rule `looked_away`).
    Without a working camera, answers can't be verified, so close-to-budget and over-budget purchases get the strict rules.
-   It listens on the mic: recording starts at the first loud sound, stops after a 0.8 s pause (`END_PAUSE`; anything well below the speaker's own volume counts as a pause, so room noise doesn't keep it recording; max 8 s), and faster-whisper transcribes it. Nothing heard in 6 s counts as "(no answer)". A typed `answer` also works; whichever arrives first wins.
+   It sends `listening` when it starts recording (the overlay shows a pulsing "Listening. Take your time"). If nothing is said in `NO_SPEECH_SECONDS`, it nudges once ("Take your time. I'm listening.") and listens again; the second silence counts as "(no answer)". After a spoken answer it says a short "Hmm." / "Okay." so the ~2 s AI wait isn't dead air.
+   It listens on the mic: recording starts at the first loud sound, stops after a 0.8 s pause (`END_PAUSE`; anything well below the speaker's own volume counts as a pause, so room noise doesn't keep it recording; max 8 s), and faster-whisper transcribes it. Nothing heard in 6 s, twice, counts as "(no answer)". A typed `answer` also works; whichever arrives first wins.
 4. The budget tier sets how long the argument is (`QUESTIONS_BY_TIER`): **easy** (fits comfortably) 2 questions, **close** (more than half of what's left) 3, **over** (more than what's left) 3. The AI is told the tier and how the user's eye contact has gone, and presses harder on close and over.
    Its job is to stop impulse buys, not necessities: with each reply it also rates the purchase `need`, `want`, or `unclear`. A need (something they rely on broke or ran out, health or safety, required for work or school, can't wait) gets a release even if it hurts the budget; upgrades, duplicates, treats, gifts, and vague or changing stories are wants.
 5. `apply_rules()` can only make a verdict stricter. A **clean** argument means every answer was spoken with camera-verified, unbroken eye contact (typed answers never count) and nothing went unanswered.
@@ -174,6 +185,7 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - Eye-contact thresholds: `LOOK_MAX_YAW` (`0.15`), `LOOK_MIN_PITCH` (`0.25`), `LOOK_MAX_PITCH` (`0.85`), `LOOK_MAX_EYE_TURN` (`0.45`)
 - `STORE` (default `json`; `firestore` for Cloud Run), `PROFILE_ID` (default `default`; the Firestore document), `PROFILE_FILE` (default `profile.json`; tests point it elsewhere)
 - `MIC_DEVICE` (default `logitech`; the first input whose name contains this)
+- `SPEAKER` (default `jbl`; Piggyback's voice goes to the first audio output whose name contains this, via `say -a`; re-checked every 30 s so a speaker that reconnects is picked up; falls back to the system default)
 - `LISTEN` (default `1`; `0` turns off the mic, answers must be typed), `WHISPER_MODEL` (default `base.en`), `MAX_LISTEN_SECONDS` (default `8`), `NO_SPEECH_SECONDS` (default `6`)
 
 Run:
@@ -191,7 +203,7 @@ Close the Arduino Serial Monitor before starting the brain: only one program can
 
 Camera calibration: with the brain running, open `http://localhost:8000/vision.jpg` (refresh to update) and `http://localhost:8000/vision`. Sit where the user sits: the marker should turn green only when you look at the OLED eyes. Adjust the `LOOK_*` values from the numbers shown. Then check the head turns toward you, not away; if not, set `TRACK_INVERT_PAN` / `TRACK_INVERT_TILT`. Allow camera access for your terminal the first time.
 
-Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods can't take over: the camera and mic whose names contain "logitech". If none matches (e.g. testing on a laptop), it uses the first camera and the default mic that aren't a phone or virtual device (iPhone, iPad, Desk View, BlackHole, OBS, Zoom, Teams). `/health` and the startup log show which camera and mic were picked. Run `python check_devices.py` from your own Terminal app first: macOS asks for camera and microphone permission there, and commands run by Claude Code can't trigger the popup. Turning off Continuity Camera on nearby iPhones (Settings → General → AirPlay & Continuity) also helps. The Whisper model (~150 MB) downloads on the first run, so start the brain once before the venue Wi-Fi matters.
+Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods can't take over: the camera and mic whose names contain "logitech", and the speaker whose name contains "jbl" (`python check_devices.py speaker` lists outputs and says a test line on the one picked). If none matches (e.g. testing on a laptop), it uses the first camera and the default mic that aren't a phone or virtual device (iPhone, iPad, Desk View, BlackHole, OBS, Zoom, Teams). `/health` and the startup log show which camera, mic, and speaker were picked. Run `python check_devices.py` from your own Terminal app first: macOS asks for camera and microphone permission there, and commands run by Claude Code can't trigger the popup. Turning off Continuity Camera on nearby iPhones (Settings → General → AirPlay & Continuity) also helps. The Whisper model (~150 MB) downloads on the first run, so start the brain once before the venue Wi-Fi matters.
 
 ## ESP32 firmware (firmware/piggyback_esp32)
 
@@ -206,7 +218,7 @@ Devices are picked by name, so a nearby iPhone (Continuity Camera) or AirPods ca
 
 ## Hardware
 
-- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, Logitech webcam with mic (on the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
+- ESP32 dev board, 2× MG90S neck servos (pan/tilt; head must be light), 2× SSD1306 0.96" OLED eyes, Logitech webcam with mic (on the laptop), JBL speaker for Piggyback's voice (connected to the laptop), Facmogu bench supply at 5V for servos, barrel-jack screw adapter, 470 µF capacitor across the servo rail. PCA9685 is a spare.
 - Webcam goes inside the head, between or just above the OLED eyes, so looking at the eyes = looking at the camera. Take it out of its clip/stand to save weight: MG90S servos are small, so keep the camera close to the tilt axis and leave slack in the USB cable so it doesn't drag the head. Its mic is now right next to the servos, which is why the head freezes while recording.
 - Power rules: servos run from the bench supply, never from the ESP32's 5V/VIN pin; the ESP32 is powered by the laptop's USB; all grounds shared (bench supply ground ↔ ESP32 GND). OLEDs run from the ESP32's 3.3V pin.
 

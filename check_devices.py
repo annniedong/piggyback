@@ -1,8 +1,9 @@
-"""Check the webcam and mic before running the brain.
+"""Check the webcam, mic, and speaker before running the brain.
 
-  python check_devices.py          # camera, then mic
+  python check_devices.py          # camera, mic, then speaker
   python check_devices.py camera
   python check_devices.py mic
+  python check_devices.py speaker             # list audio outputs and say a test line on the picked one
   python check_devices.py camera --snapshot   # also save what each camera sees to /tmp
   python check_devices.py gemini              # check GEMINI_API_KEY, the model name, and response time
 
@@ -85,6 +86,23 @@ def check_mic():
     print("Heard:", repr(text) if text else "(nothing: check the input device and microphone permission)")
 
 
+def check_speaker():
+    """Which output Piggyback's voice goes to (SPEAKER, default "jbl"), and a test line on it."""
+    import subprocess
+
+    outputs = brain.audio_outputs()
+    speaker, name = brain.pick_speaker()
+    print("Audio outputs:")
+    for i, n in outputs:
+        print(f"  {'->' if i == speaker else '  '} {n}")
+    if not speaker:
+        print(f"No output named like {brain.SPEAKER!r}: using the system default. Is the speaker on and connected? "
+              "Or set SPEAKER to part of a name above.")
+    print(f"Saying a test line on: {name}")
+    subprocess.run(["say", "-r", str(brain.SPEECH_RATE)] + (["-a", speaker] if speaker else [])
+                   + ["Hi, I'm Piggyback. Put it back."])
+
+
 def check_gemini():
     import asyncio
     import os
@@ -142,3 +160,5 @@ if __name__ == "__main__":
         check_camera()
     if which in ("mic", "both"):
         check_mic()
+    if which in ("speaker", "both"):
+        check_speaker()

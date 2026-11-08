@@ -15,6 +15,7 @@
 importScripts("adsignals.js"); // PiggybackAds.adSource
 
 const ALERT_URL = "http://localhost:8000/alert";
+const ADDED_URL = "http://localhost:8000/added";
 const RETARGET_AFTER_MS = 60 * 60 * 1000;   // an ad bringing you back after 1 h+ counts as retargeting
 const SPONSORED_MATCH_MS = 10 * 60 * 1000;  // a sponsored click counts for its site's visits for 10 min
 const MAX_REMEMBERED = 300;                  // products / stores remembered for retargeting
@@ -152,6 +153,20 @@ async function onSalePage(page) {
   await chrome.storage.local.set({ lastSale: { ...result, site: host, at: Date.now() } });
 }
 
+// Something went into the bag: Piggyback says one quick line (brain.py POST /added).
+async function onAdded(msg) {
+  try {
+    await fetch(ADDED_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ website: msg.url, item: String(msg.item || "something").slice(0, 120),
+                             price: Number.isFinite(msg.price) ? msg.price : null }),
+    });
+  } catch {
+    // Brain is off.
+  }
+}
+
 // ------------------------------------------------------------------ messages
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -159,6 +174,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     onShopPage(sender.tab.id, msg.url, msg.ad || null);
   } else if (msg.kind === "sponsored_click") {
     onSponsoredClick(msg.from, msg.to);
+  } else if (msg.kind === "added") {
+    onAdded(msg);
   } else if (msg.kind === "upsell") {
     postToBrain("upsell", msg.url, null, null, msg.label);
   } else if (msg.kind === "cart" && sender.tab) {
