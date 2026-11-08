@@ -580,6 +580,8 @@ async def ask_llm(session: dict, final: bool) -> dict:
 
 REVIEW_PROMPT = """You are Piggyback, a robot piggy bank, giving the user a quick review of this month's
 spending. Dry, funny, on their side. Base everything only on the data given; never invent numbers.
+checkouts_completed / checkouts_abandoned count this calendar month; checkouts_today counts only today.
+Only say "today" about numbers from checkouts_today.
 Give general budgeting guidance (spending patterns, categories to cut, habits like waiting before
 buying). Do not give investment, tax, credit, or debt advice, and do not recommend financial products.
 If they have savings goals, say how this month's spending affects them. Give them credit for things
@@ -611,6 +613,9 @@ def spending_stats() -> dict:
     decisions = []
     if DECISIONS_FILE.exists():
         decisions = [json.loads(l) for l in DECISIONS_FILE.read_text().splitlines() if l.strip()]
+    today = datetime.now().date().isoformat()
+    this_month = [d for d in decisions if str(d.get("time", "")).startswith(today[:7])]
+    today_only = [d for d in this_month if str(d.get("time", "")).startswith(today)]
     return {
         "monthly_budget": profile["monthly_budget"],
         "spent": store.spent(profile),
@@ -623,9 +628,13 @@ def spending_stats() -> dict:
                          if w["status"] in ("waiting", "still_want")],
         "recent_arguments": [{k: a.get(k) for k in ("item", "price", "verdict", "need")}
                              for a in profile["arguments"][-10:]],
-        "checkouts_completed": sum(d.get("outcome") == "completed" for d in decisions),
-        "checkouts_abandoned": sum(d.get("outcome") == "abandoned" for d in decisions),
-        "recent_decisions": decisions[-10:],
+        # Checkout counts are this calendar month and today, so the AI can't present all-time totals as "today".
+        "today": today,
+        "checkouts_completed": sum(d.get("outcome") == "completed" for d in this_month),
+        "checkouts_abandoned": sum(d.get("outcome") == "abandoned" for d in this_month),
+        "checkouts_today": {"completed": sum(d.get("outcome") == "completed" for d in today_only),
+                            "abandoned": sum(d.get("outcome") == "abandoned" for d in today_only)},
+        "recent_decisions": [{k: d.get(k) for k in ("time", "item", "outcome", "verdict")} for d in this_month[-10:]],
     }
 
 
