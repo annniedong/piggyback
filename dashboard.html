@@ -133,6 +133,24 @@
   q { font-style: italic; }
   q::before, q::after { color: var(--pink-deep); font-weight: 700; }
 
+  /* History (Tiger Data) */
+  .minis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px 0 14px; }
+  .mini { border: 2px solid var(--line); border-radius: 14px; padding: 8px 12px; background: var(--bg); }
+  .mini b { display: block; font: 800 22px/1.1 var(--display); letter-spacing: -0.02em; }
+  .mini span { font-size: 12px; color: var(--muted); }
+  h3 { margin: 16px 0 6px; font: 800 15px var(--display); }
+  .eye { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, 1.3fr) 96px; gap: 10px; align-items: center; padding: 6px 0; }
+  .eye .stamp { justify-self: end; }
+  .eye .item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eye .bar { margin: 0; }
+  .eye .bar div { background: var(--pink); }
+  .days { display: flex; align-items: flex-end; gap: 3px; height: 110px; border-bottom: 2px solid var(--line); }
+  .days > div { flex: 1; display: flex; flex-direction: column-reverse; gap: 1px; min-width: 0; height: 100%; }
+  .days .spent { background: var(--pink); border-radius: 3px 3px 0 0; }
+  .days .saved { background: var(--mint); border-radius: 3px 3px 0 0; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+
   .empty { color: var(--muted); font-size: 14px; margin: 0; padding: 14px; border: 2px dashed color-mix(in srgb, var(--ink) 20%, transparent);
            border-radius: 14px; text-align: center; }
   .error { color: var(--red-ink); font-size: 13px; margin: 8px 0 0; font-weight: 700; }
@@ -151,6 +169,8 @@
     .stats { grid-template-columns: 1fr; }
     .stat { transform: none !important; }
     .two { grid-template-columns: 1fr; }
+    .minis { grid-template-columns: 1fr 1fr; }
+    .mini:last-child { grid-column: span 2; }
   }
 </style>
 </head>
@@ -223,6 +243,22 @@
       <div id="arguments"></div>
     </section>
   </div>
+
+  <section class="card" id="history" hidden>
+    <div class="card-head"><h2>Stare history</h2><span class="tag">Tiger Data</span></div>
+    <p class="muted">Every argument, 10 snapshots a second: were you looking me in the eyes while you made your case?</p>
+    <div class="minis">
+      <div class="mini"><b id="h-eye">–</b><span>eye contact while answering</span></div>
+      <div class="mini"><b id="h-rows">–</b><span>gaze snapshots stored</span></div>
+      <div class="mini"><b id="h-hour">–</b><span id="h-hour-sub">riskiest hour</span></div>
+    </div>
+    <h3>Eye contact per argument</h3>
+    <div id="h-args"></div>
+    <h3>Spent vs. saved, last 30 days</h3>
+    <div class="days" id="h-days" role="img" aria-label="Money spent and saved per day"></div>
+    <div class="legend"><span><i style="background:var(--pink)"></i>Spent</span><span><i style="background:var(--mint)"></i>Saved by letting go</span><span id="h-store"></span></div>
+    <p class="error" id="h-error" hidden></p>
+  </section>
 
   <section class="card">
     <form id="budget-form" class="budget-form">
@@ -331,6 +367,40 @@ async function refresh() {
   }
 }
 
+const hour12 = (h) => `${h % 12 || 12} ${h < 12 ? "am" : "pm"}`;
+
+function renderHistory(t) {
+  $("history").hidden = !t.enabled;
+  if (!t.enabled) return;
+  $("h-error").hidden = !t.error;
+  if (t.error) { $("h-error").textContent = "Can't reach the history database right now."; return; }
+  $("h-eye").textContent = t.eye_contact == null ? "–" : Math.round(100 * t.eye_contact) + "%";
+  $("h-rows").textContent = t.gaze_rows.toLocaleString();
+  const risky = t.by_hour.filter((h) => h.checkouts >= 2).sort((a, b) => b.stopped / b.checkouts - a.stopped / a.checkouts)[0];
+  $("h-hour").textContent = risky ? hour12(risky.hour) : "–";
+  $("h-hour-sub").textContent = risky ? `riskiest hour: ${risky.stopped} of ${risky.checkouts} checkouts stopped` : "riskiest hour (needs more checkouts)";
+  $("h-args").innerHTML = t.arguments.length ? t.arguments.map((a) => {
+    const pct = a.eye_contact == null ? null : Math.round(100 * a.eye_contact);
+    return `<div class="eye"><span class="item" title="${esc(a.item)}">${esc(a.item)}</span>
+      <div class="bar">${pct == null ? `<span>typed</span>` : `<div style="width:${pct}%"></div><span>${pct}%</span>`}</div>
+      <span class="stamp ${esc(a.verdict)}">${esc(STAMPS[a.verdict] || a.verdict)}</span></div>`;
+  }).join("") : `<p class="empty">No argued checkouts recorded yet.</p>`;
+  const byDay = Object.fromEntries(t.days.map((d) => [d.day, d]));
+  const days = [...Array(30)].map((_, i) => {
+    const d = new Date(Date.now() - (29 - i) * 86400000);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return byDay[key] || {day: key, spent: 0, saved: 0};
+  });
+  const top = Math.max(1, ...days.map((d) => d.spent + d.saved));
+  $("h-days").innerHTML = days.map((d) => `<div title="${d.day}: spent ${money(d.spent)}, saved ${money(d.saved)}">
+      <span class="spent" style="height:${100 * d.spent / top}%"></span><span class="saved" style="height:${100 * d.saved / top}%"></span></div>`).join("");
+  $("h-store").textContent = `${t.events} events · gaze table ${t.gaze_size}` + (t.compression != null ? ` · ${Math.round(100 * t.compression)}% compressed` : "");
+}
+
+async function refreshHistory() {
+  try { renderHistory(await api("/trends")); } catch (e) { /* the main status already says if Piggyback is down */ }
+}
+
 async function act(path, method, body) {
   try { render(await api(path, method, body)); } catch (e) { alert(e.message); }
 }
@@ -380,6 +450,8 @@ document.addEventListener("pointermove", (e) => {
 });
 
 refresh();
+refreshHistory();
+setInterval(refreshHistory, 10000);
 // Live during the demo: the waiting room fills in as Piggyback gives verdicts.
 setInterval(() => { if (!document.activeElement?.matches("input, select")) refresh(); }, 4000);
 </script>

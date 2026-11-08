@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, HttpUrl
 
 import store
 import sales
+import tiger
 from sales import load_env_file
 from sales import router as sales_router
 from vision import vision
@@ -799,6 +800,7 @@ async def added_to_bag(added: AddedToBag):
     global _last_remark
     log("Added to bag:", added.model_dump(mode="json"))
     sales.note_added(str(added.website), added.item, added.price)
+    tiger.event("added", item=added.item, price=added.price, website=str(added.website))
     session = tracking["session"]
     if (session and not session["done"]) or time.time() - _last_remark < 5:
         return {"ok": True, "line": None}  # mid-argument, or a double click
@@ -842,7 +844,19 @@ async def review(speak_it: bool = False):
 def health():
     return {"ok": True, "llm": LLM_PROVIDER, "listening": LISTEN, "esp32": head.connected(),
             "vision": vision.state["running"], "camera": vision.state["camera"], "speaker": pick_speaker()[1],
-            "store": store.STORE, "remaining": store.remaining(store.load())}
+            "store": store.STORE, "remaining": store.remaining(store.load()),
+            "tiger": {k: tiger.state[k] for k in ("connected", "written", "dropped", "error")}}
+
+
+@app.get("/trends")
+def trends():
+    """History from Tiger Data for the dashboard: eye contact per argument, money per day, checkouts by hour."""
+    try:
+        data = tiger.trends()
+    except Exception as e:
+        log("Trends query failed:", repr(e))
+        return {"enabled": True, "error": repr(e)}
+    return {"enabled": False} if data is None else {"enabled": True, **data}
 
 
 # ---------------------------------------------------------------- profile API (dashboard)
@@ -912,6 +926,9 @@ def delete_goal(goal_id: str):
 
 @app.post("/waiting/{waiting_id}/let_go")
 def let_go(waiting_id: str, body: LetGo):
+    w = next((w for w in store.load()["waiting"] if w["id"] == waiting_id), None)
+    if w and w["status"] in ("waiting", "still_want"):
+        tiger.event("let_go", item=w["item"], price=w["price"], category=w.get("category"), goal_id=body.goal_id)
     return change_profile(store.let_go, waiting_id, body.goal_id)
 
 
@@ -940,6 +957,7 @@ async def warm_up():
         asyncio.create_task(asyncio.to_thread(whisper_model))
     if VISION:
         vision.start()
+    tiger.start(store.load())
     asyncio.create_task(track_user())  # also turns the head away when idle, camera or not
 
 
@@ -963,6 +981,9 @@ async def track_user():
         s = vision.state
         if not s["running"]:
             continue
+        session = tracking["session"]
+        if session and not session["done"]:
+            tiger.gaze(session["id"], s, tracking["recording"])  # eye contact through the argument, for history
         if s["present"]:
             ex, ey = s["face_x"] - 0.5, s["face_y"] - 0.5  # face offset from image center, -0.5..0.5
             gaze = [round(ex * 2 * (-1 if GAZE_INVERT_X else 1), 2), round(ey * 2, 2)]
@@ -1062,6 +1083,9 @@ async def next_turn(ws: WebSocket, session: dict, pending: "asyncio.Task | None"
                            reply.get("need", "unclear"), said)
     session["done"] = True
     session["verdict"] = verdict
+    tiger.event("verdict", session["id"], session["item"], session["price"], session["category"], verdict,
+                rule=rule, need=reply.get("need", "unclear"), llm_verdict=reply["verdict"], tier=session["tier"],
+                strikes=session["strikes"], clean=clean)
     await say_and_show(ws, reply, {
         "type": "verdict", "verdict": verdict,
         "seconds": TIMER_SECONDS if verdict == "timer" else 0,
@@ -1158,6 +1182,7 @@ async def ws_endpoint(ws: WebSocket):
                     store.note_checkout(p, str(msg.get("item", "something")), price)
                     tier = budget_tier(price, store.remaining(p))
                 session = tracking["session"] = {
+                    "id": store.new_id(),
                     "item": str(msg.get("item", "something")),
                     "price": price,
                     "category": str(msg.get("category", "other")),
@@ -1169,6 +1194,7 @@ async def ws_endpoint(ws: WebSocket):
                     "strikes": 0, "failed": False, "verified": True, "answered_all": True,
                 }
                 log(f"Budget tier: {tier} ({session['total']} questions)")
+                tiger.event("checkout", session["id"], session["item"], price, session["category"], tier=tier)
                 await turn_to_user()  # usually already facing them from the add-to-bag remark
                 await head.expr("alert")
                 # Start the AI now so it runs while the alert pose lands (saves ~0.6 s).
@@ -1190,11 +1216,16 @@ async def ws_endpoint(ws: WebSocket):
                     record["verdict"] = session["verdict"]
                 with DECISIONS_FILE.open("a") as f:
                     f.write(json.dumps(record) + "\n")
+                item = str(msg.get("item") or (session["item"] if session else "something"))
+                price = float(msg.get("price", session["price"] if session else 0))
+                category = session["category"] if session else "other"
+                sid, verdict = (session["id"], session["verdict"]) if session else (None, None)
+                tiger.event("decision", sid, item, price, category, verdict, outcome=msg.get("outcome"),
+                            seconds_on_page=msg.get("seconds_on_page"))
                 if msg.get("outcome") == "completed":
+                    tiger.event("purchase", sid, item, price, category, verdict)
                     with store.edit() as p:
-                        store.note_purchase(p, str(msg.get("item") or (session["item"] if session else "something")),
-                                            float(msg.get("price", session["price"] if session else 0)),
-                                            session["category"] if session else "other")
+                        store.note_purchase(p, item, price, category)
                 bought_anyway = session and msg.get("outcome") == "completed" and session["verdict"] in ("timer", "escalate")
                 if session:
                     session["done"] = True

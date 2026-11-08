@@ -19,6 +19,7 @@ extension ────────POST /sale, /cart──►   │  sales.py: pa
                                                │  speaks via macOS `say`, hears answers on the laptop's mic (faster-whisper)
                                          │  vision.py: webcam in the head → face position + eye contact (MediaPipe)
                                          │  store.py + dashboard.html: profile, goals, waiting room (GET /)
+                                         │  tiger.py: history in Tiger Data (Postgres + TimescaleDB, cloud)
                                          └──USB serial (JSON lines)──► ESP32 firmware
                                                                          ├─PWM──► pan servo (head turns left/right)
                                                                          └─I2C (SDA 21, SCL 22)─► one SSD1306 OLED, both eyes
@@ -34,7 +35,9 @@ No Raspberry Pi. The laptop talks to the ESP32 over a USB cable, so there's no W
 - `firmware/pig_eyes/pig_eyes.ino` (ESP32, Arduino): draws both eyes on one OLED and turns the head (one pan servo) from the brain's commands. `firmware/piggyback_esp32/` is the older all-in-one sketch, kept as a reference.
 - `vision.py` (laptop): reads the webcam in the pig's head; tracks the face and whether the user is looking at the eyes. Downloads `models/face_landmarker.task` on first run.
 - `store.py` (laptop, or Cloud Run later): the user's profile: budget, purchases, savings goals, the waiting room, and past arguments. `STORE=json` keeps it in `profile.json` (migrated automatically from the old `budget.json`); `STORE=firestore` keeps it in Firestore document `profiles/<PROFILE_ID>` (needs `pip install google-cloud-firestore`; not tested yet). Same functions either way.
-- `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget. Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
+- `tiger.py` (laptop): history in Tiger Data (Postgres + TimescaleDB). Hypertables `gaze` (one row per 0.1 s during a checkout: present, looking, answering, yaw/pitch; compressed after a day) and `events` (checkout, verdict, decision, purchase, added, let_go). Continuous aggregates `eye_contact_by_minute` and `money_by_day` (real-time, local days) feed `GET /trends`. Writes are batched once a second from a background thread, so the pig never waits on the database; without `TIGER_DB_URL` or if it's unreachable, nothing is recorded and everything else works. On the first connect to an empty database it copies the profile's purchases and arguments in. `profile.json` stays the source of truth.
+- `dashboard.html`: the profile page at `http://localhost:8000/`: money left, money saved by letting things go, arguments won, savings goals, the waiting room, recent arguments, monthly budget, and "Stare history" from `/trends` (eye contact per argument, spent vs. saved per day, riskiest hour; hidden without Tiger Data). Refreshes every 4 s, so it fills in live during the demo. Works at phone width.
+- `seed_demo.py` (laptop): fills the demo with three weeks of history: goals, purchases ($231 left of $600), a waiting room with let-go items, 11 past arguments with quotes, `decisions.jsonl`, and in Tiger Data the matching events plus a gaze time series per argument (eye contact high on releases, low on stopped ones; 11 pm is the riskiest hour). Backs up `profile.json` and `decisions.jsonl` to `*.backup-<time>` first and empties the Tiger tables. Run `python seed_demo.py` before a demo; works while the brain runs.
 - `check_devices.py` (laptop): checks the camera, mic, speaker, and Gemini before a run; lists cameras by name with brightness, `--snapshot` saves what each sees to `/tmp`.
 - `test_client.py` (laptop): pretends to be the extension for testing the brain (`--auto` canned answers, `--voice` answer out loud; `BRAIN_URL` for another port).
 - `extension/` (Chrome, Manifest V3): holds "Place order" on the demo store and runs the checkout conversation (`content.js`), Budget review popup (`popup.html`), browsing alerts to `/alert` (`background.js`). Load unpacked; see `extension/README.md`.
@@ -101,6 +104,7 @@ Profile API (HTTP, used by the dashboard; every response is the dashboard summar
 - `PUT /budget` `{"monthly_budget": 600}`
 - `POST /goals` `{"name": "Spring break trip", "target": 800, "deadline": "2027-03-01"}` (deadline optional)
 - `POST /goals/{id}/save` `{"amount": 50}` (negative to take money out); `DELETE /goals/{id}`
+- `GET /trends`: from Tiger Data: `arguments` (latest 12 with `eye_contact` 0…1 while answering, null if typed), `days` (spent, saved, verdict counts), `by_hour`, `gaze_rows`, `eye_contact`, `compression`. `{"enabled": false}` without a database.
 - `POST /waiting/{id}/let_go` `{"goal_id": "..."}` (goal optional: its price moves into that goal); `POST /waiting/{id}/still_want`
 
 No sign-in yet: fine on localhost, but add auth before putting this on a public URL.
@@ -192,6 +196,7 @@ Opening the serial port resets the ESP32, so the brain waits for `{"ready": true
 - `IDLE_LOOK` (default `0.6,0`; pan,tilt in `look` units): where the head rests when idle. Point it away from the user (toward the laptop, say); `0,0` to keep facing forward. `TURN_SECONDS` (default `1.5`): how long the turn toward or away from the user takes; raise it if the servos lag.
 - Tracking calibration: `TRACK_GAIN` (default `0.15`), `TRACK_INVERT_PAN`, `GAZE_INVERT_X` (set to `1` if the head or pupils move away from the user)
 - Eye-contact thresholds: `LOOK_MAX_YAW` (`0.15`), `LOOK_MIN_PITCH` (`0.25`), `LOOK_MAX_PITCH` (`0.85`), `LOOK_MAX_EYE_TURN` (`0.45`)
+- `TIGER_DB_URL` (unset = off): Tiger Cloud connection string (`postgres://…?sslmode=require`), in `.env` only. Service: 0.5 CPU, development, us-east-1, no replica or pooler; allow the venue's IP (or all IPs) in its allow list. `TZ_NAME` (default `America/New_York`): local time for days and hours; changing it means dropping `money_by_day` so it's rebuilt.
 - `STORE` (default `json`; `firestore` for Cloud Run), `PROFILE_ID` (default `default`; the Firestore document), `PROFILE_FILE` (default `profile.json`; tests point it elsewhere)
 - `MIC_DEVICE` (default `macbook`, the laptop's built-in mic; the first input whose name contains this. `logitech` uses the webcam's mic instead)
 - `SPEAKER` (default `jbl`; Piggyback's voice goes to the first audio output whose name contains this, via `say -a`; re-checked every 30 s so a speaker that reconnects is picked up; falls back to the system default)
