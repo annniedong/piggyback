@@ -1,10 +1,10 @@
-# Piggyback
+# PiggyBack
 
 **A robot piggy bank that judges your online purchases.** Built at MakeCU 2026 (Columbia's hardware hackathon), Creativity track.
 
 > *"Put it back."*
 
-Digital money is invisible. Piggyback gives your spending a physical, expressive presence. When you click **Place order** on a shopping site, Piggyback's Chrome extension pauses checkout. The pig turns its head toward you, changes its eyes, and asks you two or three short questions out loud about what you're buying.
+Digital money is invisible. PiggyBack gives your spending a physical, expressive presence. When you click **Place order** on a shopping site, PiggyBack's Chrome extension pauses checkout. The pig turns its head toward you, changes its eyes, and asks you two or three short questions out loud about what you're buying.
 
 The catch: you have to answer **while looking it in the eyes**. A webcam in its head checks for eye contact, and its eyes and head follow you around. Look away mid-answer and it makes you say it again. Then it gives a verdict:
 
@@ -12,9 +12,7 @@ The catch: you have to answer **while looking it in the eyes**. A webcam in its 
 - **Timer**: a cooling-off countdown before you can buy.
 - **Escalate**: too far over budget, so it gets your accountability buddy involved.
 
-You can always buy anyway. Piggyback notices, and tells you so.
-
-![How Piggyback works](media/piggyback-flow.png)
+![How PiggyBack works](media/)
 
 ## How it works
 
@@ -81,12 +79,5 @@ No camera, mic, ESP32, or API key needed.
 
 ## More
 
-- [CLAUDE.md](CLAUDE.md): the full spec: message formats, every environment variable, brain behavior, calibration, and testing milestones.
 - [extension/README.md](extension/README.md): the Chrome extension and the ad/upsell signals it notices.
 - [bot/README.md](bot/README.md): optional Playwright browser that watches Amazon, Target, and Walmart tabs.
-
-## Team
-
-- **Alisha**: Chrome extension, page reading, and the demo store
-- **Annie**: brain server, AI, and the laptop-to-ESP32 connection
-- **Lorraine and Hana**: the pig's head and neck mount, wiring, servos, OLED, and ESP32 firmware
