@@ -11,8 +11,16 @@ The catch: you have to answer **while looking it in the eyes**. A webcam in its 
 - **Release**: go ahead, but only after you hold its stare for 3 seconds.
 - **Timer**: a cooling-off countdown before you can buy.
 - **Escalate**: too far over budget, so it gets your accountability buddy involved.
+  
+![How PiggyBack works](media/piggybackflow.png)
 
-![How PiggyBack works](media/)
+
+## Budgeting page
+![websitept1](media/web1.png)
+![websitept2](media/web2.png)
+![websitept3](media/web3.png)
+
+
 
 ## How it works
 
